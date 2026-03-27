@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify formatting
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Compile all packages
+        run: go test -run '^$' ./...
+
+  example-build:
+    name: example build
+    runs-on: ubuntu-latest
+    needs: checks
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build example
+        run: go build ./example
+
+  tests:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: TestDefaultConfigProvidesSafeDefaults
+            pattern: '^TestDefaultConfigProvidesSafeDefaults$'
+          - name: TestDefaultConfigReturnsIndependentSlices
+            pattern: '^TestDefaultConfigReturnsIndependentSlices$'
+          - name: TestNormalizeConfigSanitizesInvalidValues
+            pattern: '^TestNormalizeConfigSanitizesInvalidValues$'
+          - name: TestFromContextHandlesNilAndMissingProfile
+            pattern: '^TestFromContextHandlesNilAndMissingProfile$'
+          - name: TestMiddlewareInjectsProfileAndPreservesBody
+            pattern: '^TestMiddlewareInjectsProfileAndPreservesBody$'
+          - name: TestWrapProvidesConvenienceMiddleware
+            pattern: '^TestWrapProvidesConvenienceMiddleware$'
+          - name: TestCaptureBodyTruncatesAndReplaysFullBody
+            pattern: '^TestCaptureBodyTruncatesAndReplaysFullBody$'
+          - name: TestAnalyzeFingerprintNormalizesInputsAndBuildsStableHash
+            pattern: '^TestAnalyzeFingerprintNormalizesInputsAndBuildsStableHash$'
+          - name: TestAnalyzeFingerprintFallsBackToSHA256
+            pattern: '^TestAnalyzeFingerprintFallsBackToSHA256$'
+          - name: TestAnalyzeComplexityJSONStats
+            pattern: '^TestAnalyzeComplexityJSONStats$'
+          - name: TestAnalyzeComplexityEmitsWarningWhenJSONLimitIsExceeded
+            pattern: '^TestAnalyzeComplexityEmitsWarningWhenJSONLimitIsExceeded$'
+          - name: TestAnalyzeComplexityFormStats
+            pattern: '^TestAnalyzeComplexityFormStats$'
+          - name: TestAnalyzeCharsetFlagsSuspiciousPatterns
+            pattern: '^TestAnalyzeCharsetFlagsSuspiciousPatterns$'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run test
+        run: go test -run "${{ matrix.pattern }}" ./...
