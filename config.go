@@ -5,6 +5,7 @@ import "strings"
 const (
 	defaultMaxReadBytes        int64 = 1 << 20
 	defaultSampleBytes               = 32 << 10
+	defaultReadChunkSize             = 8 << 10
 	defaultCharsetAnalyzeBytes       = 16 << 10
 	defaultMaxJSONDepth              = 32
 	defaultMaxFields                 = 10_000
@@ -51,7 +52,9 @@ var (
 type SampleStrategy string
 
 const (
-	SampleStrategyHead SampleStrategy = "head"
+	SampleStrategyHead     SampleStrategy = "head"
+	SampleStrategyTail     SampleStrategy = "tail"
+	SampleStrategyHeadTail SampleStrategy = "head_tail"
 )
 
 type Config struct {
@@ -67,19 +70,26 @@ type Config struct {
 }
 
 type BodyConfig struct {
-	MaxReadBytes        int64
-	SampleBytes         int
-	SampleStrategy      SampleStrategy
-	AnalyzeMethods      []string
-	AnalyzeContentTypes []string
+	MaxReadBytes             int64
+	MaxDecompressedBytes     int64
+	StreamReadChunkSize      int
+	SampleBytes              int
+	SampleStrategy           SampleStrategy
+	EnableCompressedAnalysis bool
+	AnalyzeMethods           []string
+	AnalyzeContentTypes      []string
 }
 
 type FingerprintConfig struct {
-	Headers       []string
-	IncludeIP     bool
-	IncludeTLS    bool
-	TrustProxy    bool
-	ProxyHeaders  []string
+	Headers           []string
+	IncludeIP         bool
+	IncludeTLS        bool
+	TrustProxy        bool
+	ProxyHeaders      []string
+	TrustedProxyCIDRs []string
+
+	// When false, the result keeps only hashes/source metadata and omits raw normalized fields.
+	ExposeFields  bool
 	HashAlgorithm string
 	HashVersion   string
 }
@@ -93,9 +103,11 @@ type ComplexityConfig struct {
 }
 
 type CharsetConfig struct {
-	MaxAnalyzeBytes         int
-	EnableUnicodeScripts    bool
-	EnableSuspiciousPattern bool
+	MaxAnalyzeBytes             int
+	EnableUnicodeScripts        bool
+	EnableSuspiciousPattern     bool
+	EnableConfusableDetection   bool
+	EnableFormatSpecificMetrics bool
 }
 
 func DefaultConfig() Config {
@@ -105,18 +117,22 @@ func DefaultConfig() Config {
 		EnableComplexity:  true,
 		EnableCharset:     true,
 		Body: BodyConfig{
-			MaxReadBytes:        defaultMaxReadBytes,
-			SampleBytes:         defaultSampleBytes,
-			SampleStrategy:      SampleStrategyHead,
-			AnalyzeMethods:      append([]string(nil), defaultAnalyzeMethods...),
-			AnalyzeContentTypes: append([]string(nil), defaultAnalyzeContentTypes...),
+			MaxReadBytes:         defaultMaxReadBytes,
+			MaxDecompressedBytes: defaultMaxReadBytes,
+			StreamReadChunkSize:  defaultReadChunkSize,
+			SampleBytes:          defaultSampleBytes,
+			SampleStrategy:       SampleStrategyHead,
+			AnalyzeMethods:       append([]string(nil), defaultAnalyzeMethods...),
+			AnalyzeContentTypes:  append([]string(nil), defaultAnalyzeContentTypes...),
 		},
 		Fingerprint: FingerprintConfig{
-			Headers:       append([]string(nil), defaultFingerprintHeaders...),
-			IncludeTLS:    true,
-			ProxyHeaders:  append([]string(nil), defaultProxyHeaders...),
-			HashAlgorithm: defaultHashAlgorithm,
-			HashVersion:   defaultHashVersion,
+			Headers:           append([]string(nil), defaultFingerprintHeaders...),
+			IncludeTLS:        true,
+			ProxyHeaders:      append([]string(nil), defaultProxyHeaders...),
+			ExposeFields:      true,
+			HashAlgorithm:     defaultHashAlgorithm,
+			HashVersion:       defaultHashVersion,
+			TrustedProxyCIDRs: nil,
 		},
 		Complexity: ComplexityConfig{
 			MaxJSONDepth:          defaultMaxJSONDepth,
@@ -125,8 +141,10 @@ func DefaultConfig() Config {
 			EnableFormAnalysis:    true,
 		},
 		Charset: CharsetConfig{
-			MaxAnalyzeBytes:         defaultCharsetAnalyzeBytes,
-			EnableSuspiciousPattern: true,
+			MaxAnalyzeBytes:             defaultCharsetAnalyzeBytes,
+			EnableSuspiciousPattern:     true,
+			EnableConfusableDetection:   true,
+			EnableFormatSpecificMetrics: true,
 		},
 	})
 }
@@ -140,12 +158,22 @@ func normalizeConfig(cfg Config) Config {
 		cfg.Body.SampleBytes = defaultSampleBytes
 	}
 
+	if cfg.Body.StreamReadChunkSize <= 0 {
+		cfg.Body.StreamReadChunkSize = defaultReadChunkSize
+	}
+
 	maxReadBytes := clampInt64ToInt(cfg.Body.MaxReadBytes)
 	if maxReadBytes > 0 && cfg.Body.SampleBytes > maxReadBytes {
 		cfg.Body.SampleBytes = maxReadBytes
 	}
 
-	if cfg.Body.SampleStrategy != SampleStrategyHead {
+	if cfg.Body.MaxDecompressedBytes <= 0 {
+		cfg.Body.MaxDecompressedBytes = cfg.Body.MaxReadBytes
+	}
+
+	if cfg.Body.SampleStrategy != SampleStrategyHead &&
+		cfg.Body.SampleStrategy != SampleStrategyTail &&
+		cfg.Body.SampleStrategy != SampleStrategyHeadTail {
 		cfg.Body.SampleStrategy = SampleStrategyHead
 	}
 
@@ -173,9 +201,15 @@ func normalizeConfig(cfg Config) Config {
 		cfg.Fingerprint.ProxyHeaders = normalizeValues(cfg.Fingerprint.ProxyHeaders)
 	}
 
+	cfg.Fingerprint.TrustedProxyCIDRs = normalizeCIDRs(cfg.Fingerprint.TrustedProxyCIDRs)
+
 	cfg.Fingerprint.HashAlgorithm = strings.ToLower(strings.TrimSpace(cfg.Fingerprint.HashAlgorithm))
 	if cfg.Fingerprint.HashAlgorithm == "" {
 		cfg.Fingerprint.HashAlgorithm = defaultHashAlgorithm
+	}
+
+	if !cfg.Fingerprint.ExposeFields && len(cfg.Fingerprint.Headers) == 0 {
+		cfg.Fingerprint.ExposeFields = false
 	}
 
 	cfg.Fingerprint.HashVersion = strings.TrimSpace(cfg.Fingerprint.HashVersion)
@@ -233,6 +267,25 @@ func normalizeValues(values []string) []string {
 
 	for _, value := range values {
 		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	return normalized
+}
+
+func normalizeCIDRs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+
+	for _, value := range values {
+		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
 		}

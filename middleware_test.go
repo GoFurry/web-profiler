@@ -2,6 +2,7 @@ package webprofiler
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -71,6 +72,18 @@ func TestMiddlewareInjectsProfileAndPreservesBody(t *testing.T) {
 		t.Fatalf("unexpected content length: got %d want %d", gotProfile.Meta.ContentLength, len(payload))
 	}
 
+	if gotProfile.Meta.ObservedBytes != int64(len(payload)) {
+		t.Fatalf("unexpected observed bytes: got %d want %d", gotProfile.Meta.ObservedBytes, len(payload))
+	}
+
+	if gotProfile.Meta.HeaderCount < 2 {
+		t.Fatalf("expected at least host and content-type to be counted, got %d", gotProfile.Meta.HeaderCount)
+	}
+
+	if gotProfile.Meta.HeaderBytes <= 0 {
+		t.Fatalf("header bytes should be positive, got %d", gotProfile.Meta.HeaderBytes)
+	}
+
 	if gotProfile.Meta.Sampled {
 		t.Fatal("request should not be marked as sampled when the body is smaller than SampleBytes")
 	}
@@ -85,6 +98,14 @@ func TestMiddlewareInjectsProfileAndPreservesBody(t *testing.T) {
 
 	if gotProfile.Meta.AnalysisDuration < 0 {
 		t.Fatalf("analysis duration should never be negative, got %s", gotProfile.Meta.AnalysisDuration)
+	}
+
+	if gotProfile.Meta.FingerprintDuration < 0 ||
+		gotProfile.Meta.BodyCaptureDuration < 0 ||
+		gotProfile.Meta.EntropyDuration < 0 ||
+		gotProfile.Meta.ComplexityDuration < 0 ||
+		gotProfile.Meta.CharsetDuration < 0 {
+		t.Fatalf("per-analyzer durations should never be negative: %+v", gotProfile.Meta)
 	}
 
 	if gotProfile.Entropy == nil {
@@ -182,5 +203,127 @@ func TestCaptureBodyTruncatesAndReplaysFullBody(t *testing.T) {
 
 	if string(replayedBody) != payload {
 		t.Fatalf("unexpected replayed body: got %q want %q", string(replayedBody), payload)
+	}
+}
+
+func TestCaptureBodyAddsSkipWarnings(t *testing.T) {
+	t.Run("method filtered", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/search", strings.NewReader("name=alice"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+		var warnings []Warning
+		sample := captureBody(req, BodyConfig{
+			MaxReadBytes:        1024,
+			SampleBytes:         128,
+			SampleStrategy:      SampleStrategyHead,
+			AnalyzeMethods:      []string{http.MethodPost},
+			AnalyzeContentTypes: []string{"application/x-www-form-urlencoded"},
+		}, &warnings)
+
+		if sample.analyzed {
+			t.Fatal("sample should not be analyzed when the method is filtered")
+		}
+
+		if !hasWarningCode(warnings, "body_skipped_method") {
+			t.Fatalf("expected body_skipped_method warning, got %+v", warnings)
+		}
+	})
+
+	t.Run("content type filtered", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", strings.NewReader("binary"))
+		req.Header.Set("Content-Type", "application/octet-stream")
+
+		var warnings []Warning
+		sample := captureBody(req, BodyConfig{
+			MaxReadBytes:        1024,
+			SampleBytes:         128,
+			SampleStrategy:      SampleStrategyHead,
+			AnalyzeMethods:      []string{http.MethodPost},
+			AnalyzeContentTypes: []string{"application/json"},
+		}, &warnings)
+
+		if sample.analyzed {
+			t.Fatal("sample should not be analyzed when the content type is filtered")
+		}
+
+		if !hasWarningCode(warnings, "body_skipped_content_type") {
+			t.Fatalf("expected body_skipped_content_type warning, got %+v", warnings)
+		}
+	})
+}
+
+func TestBuildSampleSupportsTailAndHeadTailStrategies(t *testing.T) {
+	observed := []byte("abcdefghij")
+
+	tailSample, tailSampled := buildSample(observed, 4, SampleStrategyTail)
+	if !tailSampled || string(tailSample) != "ghij" {
+		t.Fatalf("tail sample = (%q, %v), want (%q, true)", string(tailSample), tailSampled, "ghij")
+	}
+
+	headTailSample, headTailSampled := buildSample(observed, 5, SampleStrategyHeadTail)
+	if !headTailSampled || string(headTailSample) != "abcij" {
+		t.Fatalf("head_tail sample = (%q, %v), want (%q, true)", string(headTailSample), headTailSampled, "abcij")
+	}
+}
+
+func TestCaptureBodySupportsCompressedAnalysisAndStreamingRead(t *testing.T) {
+	plainPayload := `{"msg":"hello","tags":["x","y"]}`
+
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(plainPayload)); err != nil {
+		t.Fatalf("gzip write failed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("gzip close failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", bytes.NewReader(compressed.Bytes()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+
+	var warnings []Warning
+	sample := captureBody(req, BodyConfig{
+		MaxReadBytes:             int64(compressed.Len()),
+		MaxDecompressedBytes:     1024,
+		StreamReadChunkSize:      3,
+		SampleBytes:              64,
+		SampleStrategy:           SampleStrategyHead,
+		EnableCompressedAnalysis: true,
+		AnalyzeMethods:           []string{http.MethodPost},
+		AnalyzeContentTypes:      []string{"application/json"},
+	}, &warnings)
+
+	if !sample.analyzed {
+		t.Fatal("expected compressed body to be analyzed")
+	}
+
+	if !sample.decoded {
+		t.Fatal("expected compressed body analysis to decode the payload")
+	}
+
+	if !bytes.Equal(sample.wireObserved, compressed.Bytes()) {
+		t.Fatalf("unexpected wire-observed bytes")
+	}
+
+	if string(sample.observed) != plainPayload {
+		t.Fatalf("unexpected decoded observed payload: got %q want %q", string(sample.observed), plainPayload)
+	}
+
+	if string(sample.sample) != plainPayload {
+		t.Fatalf("unexpected decoded sample payload: got %q want %q", string(sample.sample), plainPayload)
+	}
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+
+	replayedBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("failed to read replayed request body: %v", err)
+	}
+
+	if !bytes.Equal(replayedBody, compressed.Bytes()) {
+		t.Fatal("replayed request body should preserve the original compressed payload")
 	}
 }

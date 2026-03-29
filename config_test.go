@@ -16,6 +16,14 @@ func TestDefaultConfigProvidesSafeDefaults(t *testing.T) {
 		t.Fatalf("unexpected MaxReadBytes: got %d want %d", cfg.Body.MaxReadBytes, defaultMaxReadBytes)
 	}
 
+	if cfg.Body.MaxDecompressedBytes != defaultMaxReadBytes {
+		t.Fatalf("unexpected MaxDecompressedBytes: got %d want %d", cfg.Body.MaxDecompressedBytes, defaultMaxReadBytes)
+	}
+
+	if cfg.Body.StreamReadChunkSize != defaultReadChunkSize {
+		t.Fatalf("unexpected StreamReadChunkSize: got %d want %d", cfg.Body.StreamReadChunkSize, defaultReadChunkSize)
+	}
+
 	if cfg.Body.SampleBytes != defaultSampleBytes {
 		t.Fatalf("unexpected SampleBytes: got %d want %d", cfg.Body.SampleBytes, defaultSampleBytes)
 	}
@@ -60,6 +68,14 @@ func TestDefaultConfigProvidesSafeDefaults(t *testing.T) {
 		t.Fatalf("unexpected hash version: got %q want %q", cfg.Fingerprint.HashVersion, defaultHashVersion)
 	}
 
+	if !cfg.Fingerprint.ExposeFields {
+		t.Fatal("default config should expose normalized fingerprint fields")
+	}
+
+	if len(cfg.Fingerprint.TrustedProxyCIDRs) != 0 {
+		t.Fatalf("default config should not force trusted proxy CIDRs, got %v", cfg.Fingerprint.TrustedProxyCIDRs)
+	}
+
 	if cfg.Complexity.MaxJSONDepth != defaultMaxJSONDepth {
 		t.Fatalf("unexpected MaxJSONDepth: got %d want %d", cfg.Complexity.MaxJSONDepth, defaultMaxJSONDepth)
 	}
@@ -78,6 +94,14 @@ func TestDefaultConfigProvidesSafeDefaults(t *testing.T) {
 
 	if !cfg.Charset.EnableSuspiciousPattern {
 		t.Fatal("default config should enable suspicious charset pattern detection")
+	}
+
+	if !cfg.Charset.EnableConfusableDetection {
+		t.Fatal("default config should enable confusable character detection")
+	}
+
+	if !cfg.Charset.EnableFormatSpecificMetrics {
+		t.Fatal("default config should enable format-specific charset metrics")
 	}
 }
 
@@ -115,17 +139,20 @@ func TestDefaultConfigReturnsIndependentSlices(t *testing.T) {
 func TestNormalizeConfigSanitizesInvalidValues(t *testing.T) {
 	cfg := normalizeConfig(Config{
 		Body: BodyConfig{
-			MaxReadBytes:        4,
-			SampleBytes:         99,
-			SampleStrategy:      SampleStrategy("tail"),
-			AnalyzeMethods:      []string{" post ", "POST", "", " put "},
-			AnalyzeContentTypes: []string{" application/json ", "Application/JSON", "", " text/* "},
+			MaxReadBytes:         4,
+			MaxDecompressedBytes: 0,
+			StreamReadChunkSize:  0,
+			SampleBytes:          99,
+			SampleStrategy:       SampleStrategy("weird"),
+			AnalyzeMethods:       []string{" post ", "POST", "", " put "},
+			AnalyzeContentTypes:  []string{" application/json ", "Application/JSON", "", " text/* "},
 		},
 		Fingerprint: FingerprintConfig{
-			Headers:       []string{" User-Agent ", "user-agent", " Accept-Language "},
-			ProxyHeaders:  []string{" X-Forwarded-For ", "x-forwarded-for"},
-			HashAlgorithm: " ",
-			HashVersion:   " ",
+			Headers:           []string{" User-Agent ", "user-agent", " Accept-Language "},
+			ProxyHeaders:      []string{" X-Forwarded-For ", "x-forwarded-for"},
+			TrustedProxyCIDRs: []string{" 10.0.0.0/8 ", "10.0.0.0/8"},
+			HashAlgorithm:     " ",
+			HashVersion:       " ",
 		},
 		Complexity: ComplexityConfig{
 			MaxJSONDepth:          0,
@@ -143,6 +170,14 @@ func TestNormalizeConfigSanitizesInvalidValues(t *testing.T) {
 
 	if cfg.Body.SampleBytes != 4 {
 		t.Fatalf("SampleBytes should be clamped to MaxReadBytes: got %d want 4", cfg.Body.SampleBytes)
+	}
+
+	if cfg.Body.MaxDecompressedBytes != 4 {
+		t.Fatalf("MaxDecompressedBytes should default to MaxReadBytes: got %d want 4", cfg.Body.MaxDecompressedBytes)
+	}
+
+	if cfg.Body.StreamReadChunkSize != defaultReadChunkSize {
+		t.Fatalf("unexpected StreamReadChunkSize fallback: got %d want %d", cfg.Body.StreamReadChunkSize, defaultReadChunkSize)
 	}
 
 	if cfg.Body.SampleStrategy != SampleStrategyHead {
@@ -163,6 +198,10 @@ func TestNormalizeConfigSanitizesInvalidValues(t *testing.T) {
 
 	if !slices.Equal(cfg.Fingerprint.ProxyHeaders, []string{"x-forwarded-for"}) {
 		t.Fatalf("unexpected proxy header normalization: got %v", cfg.Fingerprint.ProxyHeaders)
+	}
+
+	if !slices.Equal(cfg.Fingerprint.TrustedProxyCIDRs, []string{"10.0.0.0/8"}) {
+		t.Fatalf("unexpected trusted proxy CIDR normalization: got %v", cfg.Fingerprint.TrustedProxyCIDRs)
 	}
 
 	if cfg.Fingerprint.HashAlgorithm != defaultHashAlgorithm {
@@ -187,5 +226,21 @@ func TestNormalizeConfigSanitizesInvalidValues(t *testing.T) {
 
 	if cfg.Charset.MaxAnalyzeBytes != defaultCharsetAnalyzeBytes {
 		t.Fatalf("unexpected MaxAnalyzeBytes fallback: got %d want %d", cfg.Charset.MaxAnalyzeBytes, defaultCharsetAnalyzeBytes)
+	}
+}
+
+func TestNormalizeConfigKeepsSupportedSampleStrategies(t *testing.T) {
+	for _, strategy := range []SampleStrategy{SampleStrategyHead, SampleStrategyTail, SampleStrategyHeadTail} {
+		cfg := normalizeConfig(Config{
+			Body: BodyConfig{
+				MaxReadBytes:   16,
+				SampleBytes:    8,
+				SampleStrategy: strategy,
+			},
+		})
+
+		if cfg.Body.SampleStrategy != strategy {
+			t.Fatalf("supported sample strategy should be preserved: got %q want %q", cfg.Body.SampleStrategy, strategy)
+		}
 	}
 }

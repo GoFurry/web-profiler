@@ -1,6 +1,12 @@
 package webprofiler
 
 import (
+	"bytes"
+	"encoding/json"
+	"encoding/xml"
+	"io"
+	"net/url"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -14,6 +20,7 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 	if cfg.MaxAnalyzeBytes > 0 && len(data) > cfg.MaxAnalyzeBytes {
 		data = data[:cfg.MaxAnalyzeBytes]
 	}
+	analyzedData := data
 
 	totalChars := 0
 	asciiAlpha := 0
@@ -22,8 +29,11 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 	symbols := 0
 	control := 0
 	nonASCII := 0
+	emoji := 0
+	invisible := 0
+	confusable := 0
 	zeroWidthFound := false
-	scripts := make(map[string]struct{})
+	scriptCounts := make(map[string]int)
 
 	for len(data) > 0 {
 		r, size := utf8.DecodeRune(data)
@@ -63,9 +73,18 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 		if isZeroWidthRune(r) {
 			zeroWidthFound = true
 		}
+		if isEmojiRune(r) {
+			emoji++
+		}
+		if isInvisibleRune(r) {
+			invisible++
+		}
+		if cfg.EnableConfusableDetection && confusableSkeleton(r) != "" {
+			confusable++
+		}
 		if cfg.EnableUnicodeScripts {
 			if script := majorScript(r); script != "" {
-				scripts[script] = struct{}{}
+				scriptCounts[script]++
 			}
 		}
 
@@ -77,13 +96,23 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 	}
 
 	result := &CharsetResult{
-		TotalChars:       totalChars,
-		ASCIIAlphaRatio:  ratio(asciiAlpha, totalChars),
-		DigitRatio:       ratio(digits, totalChars),
-		WhitespaceRatio:  ratio(whitespace, totalChars),
-		SymbolRatio:      ratio(symbols, totalChars),
-		ControlCharRatio: ratio(control, totalChars),
-		NonASCIIRatio:    ratio(nonASCII, totalChars),
+		TotalChars:          totalChars,
+		ASCIIAlphaRatio:     ratio(asciiAlpha, totalChars),
+		DigitRatio:          ratio(digits, totalChars),
+		WhitespaceRatio:     ratio(whitespace, totalChars),
+		SymbolRatio:         ratio(symbols, totalChars),
+		ControlCharRatio:    ratio(control, totalChars),
+		NonASCIIRatio:       ratio(nonASCII, totalChars),
+		EmojiRatio:          ratio(emoji, totalChars),
+		InvisibleCharRatio:  ratio(invisible, totalChars),
+		ConfusableCount:     confusable,
+		UnicodeScriptCounts: make(map[string]int, len(scriptCounts)),
+	}
+	for script, count := range scriptCounts {
+		result.UnicodeScriptCounts[script] = count
+	}
+	if cfg.EnableFormatSpecificMetrics {
+		result.FormatMetrics = analyzeFormatTextMetrics(sample.contentType, analyzedData)
 	}
 
 	if cfg.EnableSuspiciousPattern {
@@ -96,8 +125,11 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 		if zeroWidthFound {
 			result.SuspiciousFlags = append(result.SuspiciousFlags, "zero_width_chars")
 		}
-		if cfg.EnableUnicodeScripts && len(scripts) > 1 {
+		if cfg.EnableUnicodeScripts && len(scriptCounts) > 1 {
 			result.SuspiciousFlags = append(result.SuspiciousFlags, "mixed_unicode_scripts")
+		}
+		if cfg.EnableConfusableDetection && shouldFlagConfusable(scriptCounts, confusable) {
+			result.SuspiciousFlags = append(result.SuspiciousFlags, "confusable_homoglyphs")
 		}
 	}
 
@@ -109,6 +141,7 @@ func isTextContentType(contentType string) bool {
 		matchContentTypePattern(contentType, "application/json") ||
 		matchContentTypePattern(contentType, "application/*+json") ||
 		matchContentTypePattern(contentType, "application/x-www-form-urlencoded") ||
+		matchContentTypePattern(contentType, "text/xml") ||
 		matchContentTypePattern(contentType, "application/xml") ||
 		matchContentTypePattern(contentType, "application/*+xml")
 }
@@ -116,6 +149,27 @@ func isTextContentType(contentType string) bool {
 func isZeroWidthRune(r rune) bool {
 	switch r {
 	case '\u200b', '\u200c', '\u200d', '\ufeff':
+		return true
+	default:
+		return false
+	}
+}
+
+func isInvisibleRune(r rune) bool {
+	if isZeroWidthRune(r) {
+		return true
+	}
+	if unicode.IsControl(r) && !unicode.IsSpace(r) {
+		return true
+	}
+	return unicode.In(r, unicode.Cf)
+}
+
+func isEmojiRune(r rune) bool {
+	switch {
+	case r >= 0x1F300 && r <= 0x1FAFF:
+		return true
+	case r >= 0x2600 && r <= 0x27BF:
 		return true
 	default:
 		return false
@@ -140,6 +194,234 @@ func majorScript(r rune) string {
 		return "arabic"
 	default:
 		return ""
+	}
+}
+
+func shouldFlagConfusable(scriptCounts map[string]int, confusableCount int) bool {
+	if confusableCount == 0 {
+		return false
+	}
+	if scriptCounts["latin"] > 0 {
+		return true
+	}
+	return len(scriptCounts) > 1
+}
+
+func confusableSkeleton(r rune) string {
+	switch r {
+	case '\u0391', '\u0410', '\u0430':
+		return "a"
+	case '\u0392', '\u0412':
+		return "b"
+	case '\u03F9', '\u0421', '\u0441':
+		return "c"
+	case '\u0395', '\u0415', '\u0435':
+		return "e"
+	case '\u0397', '\u041D':
+		return "h"
+	case '\u0399', '\u0406', '\u0456':
+		return "i"
+	case '\u039A', '\u041A', '\u043A':
+		return "k"
+	case '\u039C', '\u041C', '\u043C':
+		return "m"
+	case '\u039D':
+		return "n"
+	case '\u039F', '\u041E', '\u043E':
+		return "o"
+	case '\u03A1', '\u0420', '\u0440':
+		return "p"
+	case '\u03A4', '\u0422', '\u0442':
+		return "t"
+	case '\u03A5', '\u0423', '\u0443':
+		return "y"
+	case '\u03A7', '\u0425', '\u0445':
+		return "x"
+	case '\u0408', '\u0458':
+		return "j"
+	default:
+		return ""
+	}
+}
+
+type jsonFrame struct {
+	kind      byte
+	expectKey bool
+}
+
+func analyzeFormatTextMetrics(contentType string, data []byte) *FormatTextMetrics {
+	switch {
+	case matchContentTypePattern(contentType, "application/json"),
+		matchContentTypePattern(contentType, "application/*+json"):
+		return analyzeJSONTextMetrics(data)
+	case contentType == "application/x-www-form-urlencoded":
+		return analyzeFormTextMetrics(data)
+	case matchContentTypePattern(contentType, "application/xml"),
+		matchContentTypePattern(contentType, "application/*+xml"),
+		matchContentTypePattern(contentType, "text/xml"):
+		return analyzeXMLTextMetrics(data)
+	default:
+		return nil
+	}
+}
+
+func analyzeJSONTextMetrics(data []byte) *FormatTextMetrics {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+
+	metrics := &FormatTextMetrics{Format: "json"}
+	frames := make([]jsonFrame, 0, 8)
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if metrics.TokenCount == 0 {
+				return nil
+			}
+			return metrics
+		}
+
+		metrics.TokenCount++
+		switch typed := token.(type) {
+		case json.Delim:
+			switch typed {
+			case '{':
+				frames = append(frames, jsonFrame{kind: '{', expectKey: true})
+			case '[':
+				frames = append(frames, jsonFrame{kind: '['})
+			case '}', ']':
+				if len(frames) > 0 {
+					frames = frames[:len(frames)-1]
+				}
+				markJSONValueConsumed(frames)
+			}
+		case string:
+			updateMaxTokenLength(metrics, len(typed))
+			if isJSONObjectKey(frames) {
+				metrics.KeyCount++
+				frames[len(frames)-1].expectKey = false
+				continue
+			}
+			metrics.ValueCount++
+			metrics.StringValueCount++
+			markJSONValueConsumed(frames)
+		case json.Number:
+			updateMaxTokenLength(metrics, len(typed.String()))
+			metrics.ValueCount++
+			metrics.NumberValueCount++
+			markJSONValueConsumed(frames)
+		case bool:
+			if typed {
+				updateMaxTokenLength(metrics, len("true"))
+			} else {
+				updateMaxTokenLength(metrics, len("false"))
+			}
+			metrics.ValueCount++
+			markJSONValueConsumed(frames)
+		case nil:
+			updateMaxTokenLength(metrics, len("null"))
+			metrics.ValueCount++
+			markJSONValueConsumed(frames)
+		}
+	}
+
+	return metrics
+}
+
+func isJSONObjectKey(frames []jsonFrame) bool {
+	if len(frames) == 0 {
+		return false
+	}
+	top := frames[len(frames)-1]
+	return top.kind == '{' && top.expectKey
+}
+
+func markJSONValueConsumed(frames []jsonFrame) {
+	if len(frames) == 0 {
+		return
+	}
+	top := &frames[len(frames)-1]
+	if top.kind == '{' && !top.expectKey {
+		top.expectKey = true
+	}
+}
+
+func analyzeFormTextMetrics(data []byte) *FormatTextMetrics {
+	values, err := url.ParseQuery(string(data))
+	if err != nil {
+		return nil
+	}
+
+	metrics := &FormatTextMetrics{Format: "form"}
+	metrics.KeyCount = len(values)
+	for key, values := range values {
+		updateMaxTokenLength(metrics, len(key))
+		metrics.TokenCount++
+		for _, value := range values {
+			metrics.ValueCount++
+			metrics.StringValueCount++
+			metrics.TokenCount++
+			updateMaxTokenLength(metrics, len(value))
+		}
+		if len(values) > 1 {
+			metrics.RepeatedKeyCount++
+		}
+	}
+
+	return metrics
+}
+
+func analyzeXMLTextMetrics(data []byte) *FormatTextMetrics {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	metrics := &FormatTextMetrics{Format: "xml"}
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if metrics.TokenCount == 0 {
+				return nil
+			}
+			return metrics
+		}
+
+		switch typed := token.(type) {
+		case xml.StartElement:
+			metrics.TagCount++
+			metrics.TokenCount++
+			updateMaxTokenLength(metrics, len(typed.Name.Local))
+			for _, attr := range typed.Attr {
+				metrics.AttributeCount++
+				updateMaxTokenLength(metrics, len(attr.Name.Local))
+				updateMaxTokenLength(metrics, len(attr.Value))
+			}
+		case xml.CharData:
+			text := strings.TrimSpace(string(typed))
+			if text == "" {
+				continue
+			}
+			metrics.TextNodeCount++
+			metrics.ValueCount++
+			metrics.StringValueCount++
+			metrics.TokenCount++
+			updateMaxTokenLength(metrics, len(text))
+		}
+	}
+
+	return metrics
+}
+
+func updateMaxTokenLength(metrics *FormatTextMetrics, length int) {
+	if metrics == nil {
+		return
+	}
+	if length > metrics.MaxTokenLength {
+		metrics.MaxTokenLength = length
 	}
 }
 

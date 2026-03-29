@@ -2,6 +2,8 @@ package webprofiler
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"io"
 	"mime"
 	"net/http"
@@ -9,13 +11,16 @@ import (
 )
 
 type bodySample struct {
-	contentType string
-	rawType     string
-	observed    []byte
-	sample      []byte
-	sampled     bool
-	truncated   bool
-	analyzed    bool
+	contentType     string
+	rawType         string
+	contentEncoding string
+	wireObserved    []byte
+	observed        []byte
+	sample          []byte
+	sampled         bool
+	truncated       bool
+	analyzed        bool
+	decoded         bool
 }
 
 type replayReadCloser struct {
@@ -33,37 +38,54 @@ func (r replayReadCloser) Close() error {
 func captureBody(r *http.Request, cfg BodyConfig, warnings *[]Warning) bodySample {
 	rawType := r.Header.Get("Content-Type")
 	sample := bodySample{
-		contentType: normalizedContentType(rawType),
-		rawType:     rawType,
+		contentType:     normalizedContentType(rawType),
+		rawType:         rawType,
+		contentEncoding: strings.TrimSpace(r.Header.Get("Content-Encoding")),
 	}
 
 	if r.Body == nil || r.Body == http.NoBody {
+		appendWarning(warnings, "body_skipped_empty", "request body analysis skipped because no request body was provided")
 		return sample
 	}
 
 	if !containsMethod(cfg.AnalyzeMethods, r.Method) {
+		appendWarning(warnings, "body_skipped_method", "request body analysis skipped because the HTTP method is not enabled for body analysis")
 		return sample
 	}
 
 	if !matchesContentType(sample.contentType, cfg.AnalyzeContentTypes) {
+		appendWarning(warnings, "body_skipped_content_type", "request body analysis skipped because the content type is not enabled for body analysis")
 		return sample
 	}
 
-	consumed, observed, truncated, err := readLimitedBody(r.Body, cfg.MaxReadBytes)
+	consumed, observed, truncated, err := readLimitedBody(r.Body, cfg.MaxReadBytes, cfg.StreamReadChunkSize)
 	r.Body = replayReadCloser{
 		Reader: io.MultiReader(bytes.NewReader(consumed), r.Body),
 		closer: r.Body,
 	}
 
 	sample.analyzed = true
+	sample.wireObserved = observed
 	sample.observed = observed
 	sample.truncated = truncated
-
-	if cfg.SampleBytes < len(observed) {
-		sample.sample = append([]byte(nil), observed[:cfg.SampleBytes]...)
-		sample.sampled = true
-	} else {
-		sample.sample = append([]byte(nil), observed...)
+	if cfg.EnableCompressedAnalysis {
+		decoded, decodedTruncated, applied, decodeErr := decodeObservedBody(observed, sample.contentEncoding, cfg.MaxDecompressedBytes, cfg.StreamReadChunkSize)
+		switch {
+		case decodeErr != nil && applied:
+			appendWarning(warnings, "body_decompression_failed", decodeErr.Error())
+		case decodeErr != nil && sample.contentEncoding != "":
+			appendWarning(warnings, "body_content_encoding_unsupported", decodeErr.Error())
+		case applied:
+			sample.observed = decoded
+			sample.decoded = true
+			if decodedTruncated {
+				appendWarning(warnings, "body_decompressed_truncated", "decoded request body observation reached MaxDecompressedBytes and was truncated")
+			}
+		}
+	}
+	sample.sample, sample.sampled = buildSample(observed, cfg.SampleBytes, cfg.SampleStrategy)
+	if sample.decoded {
+		sample.sample, sample.sampled = buildSample(sample.observed, cfg.SampleBytes, cfg.SampleStrategy)
 	}
 
 	if truncated {
@@ -77,19 +99,141 @@ func captureBody(r *http.Request, cfg BodyConfig, warnings *[]Warning) bodySampl
 	return sample
 }
 
-func readLimitedBody(body io.ReadCloser, maxReadBytes int64) (consumed []byte, observed []byte, truncated bool, err error) {
+func buildSample(observed []byte, sampleBytes int, strategy SampleStrategy) ([]byte, bool) {
+	if sampleBytes <= 0 || len(observed) == 0 {
+		return nil, false
+	}
+
+	if sampleBytes >= len(observed) {
+		return append([]byte(nil), observed...), false
+	}
+
+	switch strategy {
+	case SampleStrategyTail:
+		start := len(observed) - sampleBytes
+		return append([]byte(nil), observed[start:]...), true
+	case SampleStrategyHeadTail:
+		headBytes := (sampleBytes + 1) / 2
+		tailBytes := sampleBytes / 2
+		sample := make([]byte, 0, sampleBytes)
+		sample = append(sample, observed[:headBytes]...)
+		sample = append(sample, observed[len(observed)-tailBytes:]...)
+		return sample, true
+	case SampleStrategyHead:
+		fallthrough
+	default:
+		return append([]byte(nil), observed[:sampleBytes]...), true
+	}
+}
+
+func readLimitedBody(body io.ReadCloser, maxReadBytes int64, chunkSize int) (consumed []byte, observed []byte, truncated bool, err error) {
 	if maxReadBytes <= 0 {
 		return nil, nil, false, nil
 	}
 
-	consumed, err = io.ReadAll(io.LimitReader(body, maxReadBytes+1))
+	consumed, truncated, err = readWithLimit(body, maxReadBytes, chunkSize)
 	observed = consumed
-	if int64(len(consumed)) > maxReadBytes {
-		truncated = true
+	if truncated {
 		observed = consumed[:maxReadBytes]
 	}
 
 	return consumed, observed, truncated, err
+}
+
+func readWithLimit(reader io.Reader, maxBytes int64, chunkSize int) (data []byte, truncated bool, err error) {
+	if maxBytes <= 0 {
+		return nil, false, nil
+	}
+	if chunkSize <= 0 {
+		chunkSize = defaultReadChunkSize
+	}
+
+	remaining := maxBytes + 1
+	var buffer bytes.Buffer
+	chunk := make([]byte, chunkSize)
+
+	for remaining > 0 {
+		readSize := chunkSize
+		if int64(readSize) > remaining {
+			readSize = int(remaining)
+		}
+
+		n, readErr := reader.Read(chunk[:readSize])
+		if n > 0 {
+			_, _ = buffer.Write(chunk[:n])
+			remaining -= int64(n)
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return buffer.Bytes(), int64(buffer.Len()) > maxBytes, readErr
+		}
+	}
+
+	data = buffer.Bytes()
+	return data, int64(len(data)) > maxBytes, nil
+}
+
+func decodeObservedBody(data []byte, encodingHeader string, maxBytes int64, chunkSize int) (decoded []byte, truncated bool, applied bool, err error) {
+	encodings := parseContentEncodings(encodingHeader)
+	if len(encodings) == 0 {
+		return nil, false, false, nil
+	}
+	if len(encodings) > 1 {
+		return nil, false, false, errUnsupportedContentEncodingChain
+	}
+
+	var reader io.ReadCloser
+	switch encodings[0] {
+	case "gzip":
+		reader, err = gzip.NewReader(bytes.NewReader(data))
+	case "deflate":
+		reader = flate.NewReader(bytes.NewReader(data))
+	default:
+		return nil, false, false, errUnsupportedContentEncoding
+	}
+	if err != nil {
+		return nil, false, true, err
+	}
+	defer func() {
+		_ = reader.Close()
+	}()
+
+	decoded, truncated, err = readWithLimit(reader, maxBytes, chunkSize)
+	if truncated && maxBytes > 0 {
+		decoded = decoded[:maxBytes]
+	}
+	return decoded, truncated, true, err
+}
+
+var (
+	errUnsupportedContentEncoding      = unsupportedContentEncodingError("unsupported content encoding for body analysis")
+	errUnsupportedContentEncodingChain = unsupportedContentEncodingError("multiple content encodings are not supported for body analysis")
+)
+
+type unsupportedContentEncodingError string
+
+func (e unsupportedContentEncodingError) Error() string {
+	return string(e)
+}
+
+func parseContentEncodings(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	encodings := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" || part == "identity" {
+			continue
+		}
+		encodings = append(encodings, part)
+	}
+	return encodings
 }
 
 func normalizedContentType(value string) string {
