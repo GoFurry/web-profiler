@@ -68,7 +68,7 @@ func analyzeRequest(r *http.Request, cfg Config) *Profile {
 
 	if cfg.EnableCharset {
 		charsetStart := time.Now()
-		profile.Charset = analyzeCharset(body, cfg.Charset)
+		profile.Charset = analyzeCharset(body, cfg.Charset, &profile.Warnings)
 		profile.Meta.CharsetDuration = time.Since(charsetStart)
 	}
 

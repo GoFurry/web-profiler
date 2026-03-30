@@ -35,6 +35,10 @@ func (r replayReadCloser) Close() error {
 	return r.closer.Close()
 }
 
+func (s bodySample) isDecodedForStructuredAnalysis() bool {
+	return s.contentEncoding == "" || s.decoded
+}
+
 func captureBody(r *http.Request, cfg BodyConfig, warnings *[]Warning) bodySample {
 	rawType := r.Header.Get("Content-Type")
 	sample := bodySample{
@@ -82,6 +86,10 @@ func captureBody(r *http.Request, cfg BodyConfig, warnings *[]Warning) bodySampl
 				appendWarning(warnings, "body_decompressed_truncated", "decoded request body observation reached MaxDecompressedBytes and was truncated")
 			}
 		}
+	}
+
+	if sample.contentEncoding != "" && !sample.decoded {
+		appendWarning(warnings, "body_encoded_not_decoded", "request body remains content-encoded, so structured and charset analysis was skipped")
 	}
 	sample.sample, sample.sampled = buildSample(observed, cfg.SampleBytes, cfg.SampleStrategy)
 	if sample.decoded {
@@ -169,6 +177,9 @@ func readWithLimit(reader io.Reader, maxBytes int64, chunkSize int) (data []byte
 		}
 		if readErr != nil {
 			return buffer.Bytes(), int64(buffer.Len()) > maxBytes, readErr
+		}
+		if n == 0 {
+			return buffer.Bytes(), int64(buffer.Len()) > maxBytes, io.ErrNoProgress
 		}
 	}
 

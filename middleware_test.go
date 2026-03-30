@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -326,4 +328,108 @@ func TestCaptureBodySupportsCompressedAnalysisAndStreamingRead(t *testing.T) {
 	if !bytes.Equal(replayedBody, compressed.Bytes()) {
 		t.Fatal("replayed request body should preserve the original compressed payload")
 	}
+}
+
+func TestAnalyzeRequestSkipsStructuredAnalysisForEncodedBodyWhenCompressedAnalysisIsDisabled(t *testing.T) {
+	plainPayload := `{"msg":"hello"}`
+
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(plainPayload)); err != nil {
+		t.Fatalf("gzip write failed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("gzip close failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", bytes.NewReader(compressed.Bytes()))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+
+	cfg := DefaultConfig()
+	cfg.Body.EnableCompressedAnalysis = false
+
+	profile := analyzeRequest(req, cfg)
+	if profile == nil {
+		t.Fatal("expected profile")
+	}
+
+	if profile.Entropy == nil {
+		t.Fatal("expected entropy result on observed bytes")
+	}
+
+	if profile.Complexity != nil {
+		t.Fatalf("expected complexity analysis to be skipped for encoded body, got %+v", profile.Complexity)
+	}
+
+	if profile.Charset != nil {
+		t.Fatalf("expected charset analysis to be skipped for encoded body, got %+v", profile.Charset)
+	}
+
+	if !hasWarningCode(profile.Warnings, "body_encoded_not_decoded") {
+		t.Fatalf("expected body_encoded_not_decoded warning, got %+v", profile.Warnings)
+	}
+}
+
+func TestAnalyzeRequestSupportsMultipartMetaWithDocumentedConfig(t *testing.T) {
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+
+	field, err := writer.CreateFormField("note")
+	if err != nil {
+		t.Fatalf("CreateFormField failed: %v", err)
+	}
+	if _, err := field.Write([]byte("hello")); err != nil {
+		t.Fatalf("field write failed: %v", err)
+	}
+
+	filePart, err := writer.CreateFormFile("upload", "avatar.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile failed: %v", err)
+	}
+	if _, err := filePart.Write([]byte("PNGDATA")); err != nil {
+		t.Fatalf("file write failed: %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer close failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", bytes.NewReader(payload.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	cfg := DefaultConfig()
+	cfg.Complexity.EnableMultipartMeta = true
+	cfg = normalizeConfig(cfg)
+
+	profile := analyzeRequest(req, cfg)
+	if profile == nil || profile.Complexity == nil {
+		t.Fatalf("expected multipart complexity result, got %+v", profile)
+	}
+
+	if profile.Complexity.MultipartFileCount != 1 || profile.Complexity.MultipartFieldCount != 1 {
+		t.Fatalf("unexpected multipart complexity stats: %+v", profile.Complexity)
+	}
+}
+
+func TestReadWithLimitReturnsNoProgressError(t *testing.T) {
+	data, truncated, err := readWithLimit(zeroReader{}, 16, 4)
+
+	if !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("expected io.ErrNoProgress, got %v", err)
+	}
+
+	if truncated {
+		t.Fatal("did not expect truncated result")
+	}
+
+	if len(data) != 0 {
+		t.Fatalf("expected no data, got %q", string(data))
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read([]byte) (int, error) {
+	return 0, nil
 }

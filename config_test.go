@@ -244,3 +244,54 @@ func TestNormalizeConfigKeepsSupportedSampleStrategies(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeConfigRestoresDefaultsWhenNormalizedListsBecomeEmpty(t *testing.T) {
+	cfg := normalizeConfig(Config{
+		Body: BodyConfig{
+			AnalyzeContentTypes: []string{" ", "\t"},
+		},
+		Fingerprint: FingerprintConfig{
+			Headers:      []string{" ", ""},
+			ProxyHeaders: []string{"", "   "},
+		},
+		Complexity: ComplexityConfig{
+			SupportedContentTypes: []string{" ", ""},
+		},
+	})
+
+	if !slices.Equal(cfg.Body.AnalyzeContentTypes, defaultAnalyzeContentTypes) {
+		t.Fatalf("blank analyze content types should restore defaults, got %v", cfg.Body.AnalyzeContentTypes)
+	}
+
+	if !slices.Equal(cfg.Fingerprint.Headers, defaultFingerprintHeaders) {
+		t.Fatalf("blank fingerprint headers should restore defaults, got %v", cfg.Fingerprint.Headers)
+	}
+
+	if !slices.Equal(cfg.Fingerprint.ProxyHeaders, defaultProxyHeaders) {
+		t.Fatalf("blank proxy headers should restore defaults, got %v", cfg.Fingerprint.ProxyHeaders)
+	}
+
+	if !slices.Equal(cfg.Complexity.SupportedContentTypes, defaultComplexityContentTypes) {
+		t.Fatalf("blank complexity content types should restore defaults, got %v", cfg.Complexity.SupportedContentTypes)
+	}
+}
+
+func TestNormalizeConfigEnablesMultipartTypesWhenMultipartMetaIsOn(t *testing.T) {
+	cfg := normalizeConfig(Config{
+		Body: BodyConfig{
+			AnalyzeContentTypes: []string{"application/json"},
+		},
+		Complexity: ComplexityConfig{
+			SupportedContentTypes: []string{"application/json"},
+			EnableMultipartMeta:   true,
+		},
+	})
+
+	if !slices.Contains(cfg.Body.AnalyzeContentTypes, "multipart/form-data") {
+		t.Fatalf("expected multipart/form-data in body analyze content types, got %v", cfg.Body.AnalyzeContentTypes)
+	}
+
+	if !slices.Contains(cfg.Complexity.SupportedContentTypes, "multipart/form-data") {
+		t.Fatalf("expected multipart/form-data in complexity supported content types, got %v", cfg.Complexity.SupportedContentTypes)
+	}
+}

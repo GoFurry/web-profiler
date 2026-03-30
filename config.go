@@ -186,19 +186,19 @@ func normalizeConfig(cfg Config) Config {
 	if len(cfg.Body.AnalyzeContentTypes) == 0 {
 		cfg.Body.AnalyzeContentTypes = append([]string(nil), defaultAnalyzeContentTypes...)
 	} else {
-		cfg.Body.AnalyzeContentTypes = normalizeValues(cfg.Body.AnalyzeContentTypes)
+		cfg.Body.AnalyzeContentTypes = normalizeValuesOrDefault(cfg.Body.AnalyzeContentTypes, defaultAnalyzeContentTypes)
 	}
 
 	if len(cfg.Fingerprint.Headers) == 0 {
 		cfg.Fingerprint.Headers = append([]string(nil), defaultFingerprintHeaders...)
 	} else {
-		cfg.Fingerprint.Headers = normalizeValues(cfg.Fingerprint.Headers)
+		cfg.Fingerprint.Headers = normalizeValuesOrDefault(cfg.Fingerprint.Headers, defaultFingerprintHeaders)
 	}
 
 	if len(cfg.Fingerprint.ProxyHeaders) == 0 {
 		cfg.Fingerprint.ProxyHeaders = append([]string(nil), defaultProxyHeaders...)
 	} else {
-		cfg.Fingerprint.ProxyHeaders = normalizeValues(cfg.Fingerprint.ProxyHeaders)
+		cfg.Fingerprint.ProxyHeaders = normalizeValuesOrDefault(cfg.Fingerprint.ProxyHeaders, defaultProxyHeaders)
 	}
 
 	cfg.Fingerprint.TrustedProxyCIDRs = normalizeCIDRs(cfg.Fingerprint.TrustedProxyCIDRs)
@@ -228,7 +228,12 @@ func normalizeConfig(cfg Config) Config {
 	if len(cfg.Complexity.SupportedContentTypes) == 0 {
 		cfg.Complexity.SupportedContentTypes = append([]string(nil), defaultComplexityContentTypes...)
 	} else {
-		cfg.Complexity.SupportedContentTypes = normalizeValues(cfg.Complexity.SupportedContentTypes)
+		cfg.Complexity.SupportedContentTypes = normalizeValuesOrDefault(cfg.Complexity.SupportedContentTypes, defaultComplexityContentTypes)
+	}
+
+	if cfg.Complexity.EnableMultipartMeta {
+		cfg.Body.AnalyzeContentTypes = appendUniqueValue(cfg.Body.AnalyzeContentTypes, "multipart/form-data")
+		cfg.Complexity.SupportedContentTypes = appendUniqueValue(cfg.Complexity.SupportedContentTypes, "multipart/form-data")
 	}
 
 	if cfg.Charset.MaxAnalyzeBytes <= 0 {
@@ -278,6 +283,27 @@ func normalizeValues(values []string) []string {
 	}
 
 	return normalized
+}
+
+func normalizeValuesOrDefault(values []string, defaults []string) []string {
+	normalized := normalizeValues(values)
+	if len(normalized) == 0 {
+		return append([]string(nil), defaults...)
+	}
+	return normalized
+}
+
+func appendUniqueValue(values []string, value string) []string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func normalizeCIDRs(values []string) []string {

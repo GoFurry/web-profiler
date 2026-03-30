@@ -26,6 +26,7 @@ type jsonComplexityStats struct {
 	nullCount       int
 	stringCount     int
 	uniqueKeyCount  int
+	seenKeys        map[string]struct{}
 	maxArrayLength  int
 	maxObjectFields int
 	maxKeyLength    int
@@ -34,6 +35,10 @@ type jsonComplexityStats struct {
 
 func analyzeComplexity(sample bodySample, cfg ComplexityConfig, warnings *[]Warning) *ComplexityResult {
 	if !sample.analyzed || len(sample.observed) == 0 {
+		return nil
+	}
+
+	if !sample.isDecodedForStructuredAnalysis() {
 		return nil
 	}
 
@@ -63,8 +68,14 @@ func analyzeJSONComplexity(sample bodySample, cfg ComplexityConfig, warnings *[]
 		appendWarning(warnings, "complexity_parse_failed", err.Error())
 		return nil
 	}
+	if err := ensureSingleJSONPayload(decoder); err != nil {
+		appendWarning(warnings, "complexity_parse_failed", err.Error())
+		return nil
+	}
 
-	stats := jsonComplexityStats{}
+	stats := jsonComplexityStats{
+		seenKeys: make(map[string]struct{}),
+	}
 	if err := walkJSONComplexity(payload, 1, cfg, &stats); err != nil {
 		appendWarning(warnings, "complexity_limit_exceeded", err.Error())
 	}
@@ -108,7 +119,6 @@ func walkJSONComplexity(value any, depth int, cfg ComplexityConfig, stats *jsonC
 	case map[string]any:
 		stats.objectCount++
 		stats.fieldCount += len(typed)
-		stats.uniqueKeyCount += len(typed)
 		if len(typed) > stats.maxObjectFields {
 			stats.maxObjectFields = len(typed)
 		}
@@ -116,6 +126,10 @@ func walkJSONComplexity(value any, depth int, cfg ComplexityConfig, stats *jsonC
 			return errComplexityFieldExceeded
 		}
 		for key, child := range typed {
+			if _, ok := stats.seenKeys[key]; !ok {
+				stats.seenKeys[key] = struct{}{}
+				stats.uniqueKeyCount++
+			}
 			if len(key) > stats.maxKeyLength {
 				stats.maxKeyLength = len(key)
 			}
@@ -147,6 +161,22 @@ func walkJSONComplexity(value any, depth int, cfg ComplexityConfig, stats *jsonC
 	}
 
 	return nil
+}
+
+func ensureSingleJSONPayload(decoder *json.Decoder) error {
+	if decoder == nil {
+		return nil
+	}
+
+	_, err := decoder.Token()
+	switch err {
+	case nil:
+		return errors.New("unexpected trailing data after JSON payload")
+	case io.EOF:
+		return nil
+	default:
+		return err
+	}
 }
 
 func analyzeFormComplexity(data []byte) *ComplexityResult {

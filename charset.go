@@ -11,14 +11,19 @@ import (
 	"unicode/utf8"
 )
 
-func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
+func analyzeCharset(sample bodySample, cfg CharsetConfig, warnings *[]Warning) *CharsetResult {
 	if !sample.analyzed || len(sample.sample) == 0 || !isTextContentType(sample.contentType) {
+		return nil
+	}
+
+	if !sample.isDecodedForStructuredAnalysis() {
 		return nil
 	}
 
 	data := sample.sample
 	if cfg.MaxAnalyzeBytes > 0 && len(data) > cfg.MaxAnalyzeBytes {
 		data = data[:cfg.MaxAnalyzeBytes]
+		data = trimIncompleteUTF8Suffix(data)
 	}
 	analyzedData := data
 
@@ -112,11 +117,19 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 		result.UnicodeScriptCounts[script] = count
 	}
 	if cfg.EnableFormatSpecificMetrics {
-		result.FormatMetrics = analyzeFormatTextMetrics(sample.contentType, analyzedData)
+		formatMetrics, err := analyzeFormatTextMetrics(sample.contentType, analyzedData)
+		result.FormatMetrics = formatMetrics
+		if err != nil {
+			code := "charset_format_metrics_failed"
+			if formatMetrics != nil {
+				code = "charset_format_metrics_partial"
+			}
+			appendWarning(warnings, code, err.Error())
+		}
 	}
 
 	if cfg.EnableSuspiciousPattern {
-		if !utf8.Valid(sample.sample) {
+		if !utf8.Valid(analyzedData) {
 			result.SuspiciousFlags = append(result.SuspiciousFlags, "invalid_utf8")
 		}
 		if control > 0 {
@@ -134,6 +147,21 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig) *CharsetResult {
 	}
 
 	return result
+}
+
+func trimIncompleteUTF8Suffix(data []byte) []byte {
+	if len(data) == 0 {
+		return data
+	}
+
+	start := len(data) - 1
+	for start > 0 && data[start]&0xC0 == 0x80 {
+		start--
+	}
+	if utf8.FullRune(data[start:]) {
+		return data
+	}
+	return data[:start]
 }
 
 func isTextContentType(contentType string) bool {
@@ -201,6 +229,9 @@ func shouldFlagConfusable(scriptCounts map[string]int, confusableCount int) bool
 	if confusableCount == 0 {
 		return false
 	}
+	if len(scriptCounts) == 0 {
+		return true
+	}
 	if scriptCounts["latin"] > 0 {
 		return true
 	}
@@ -249,7 +280,7 @@ type jsonFrame struct {
 	expectKey bool
 }
 
-func analyzeFormatTextMetrics(contentType string, data []byte) *FormatTextMetrics {
+func analyzeFormatTextMetrics(contentType string, data []byte) (*FormatTextMetrics, error) {
 	switch {
 	case matchContentTypePattern(contentType, "application/json"),
 		matchContentTypePattern(contentType, "application/*+json"):
@@ -261,11 +292,11 @@ func analyzeFormatTextMetrics(contentType string, data []byte) *FormatTextMetric
 		matchContentTypePattern(contentType, "text/xml"):
 		return analyzeXMLTextMetrics(data)
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
-func analyzeJSONTextMetrics(data []byte) *FormatTextMetrics {
+func analyzeJSONTextMetrics(data []byte) (*FormatTextMetrics, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 
@@ -279,9 +310,9 @@ func analyzeJSONTextMetrics(data []byte) *FormatTextMetrics {
 		}
 		if err != nil {
 			if metrics.TokenCount == 0 {
-				return nil
+				return nil, err
 			}
-			return metrics
+			return metrics, err
 		}
 
 		metrics.TokenCount++
@@ -328,7 +359,11 @@ func analyzeJSONTextMetrics(data []byte) *FormatTextMetrics {
 		}
 	}
 
-	return metrics
+	if len(frames) > 0 {
+		return metrics, io.ErrUnexpectedEOF
+	}
+
+	return metrics, nil
 }
 
 func isJSONObjectKey(frames []jsonFrame) bool {
@@ -349,10 +384,10 @@ func markJSONValueConsumed(frames []jsonFrame) {
 	}
 }
 
-func analyzeFormTextMetrics(data []byte) *FormatTextMetrics {
+func analyzeFormTextMetrics(data []byte) (*FormatTextMetrics, error) {
 	values, err := url.ParseQuery(string(data))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	metrics := &FormatTextMetrics{Format: "form"}
@@ -371,10 +406,10 @@ func analyzeFormTextMetrics(data []byte) *FormatTextMetrics {
 		}
 	}
 
-	return metrics
+	return metrics, nil
 }
 
-func analyzeXMLTextMetrics(data []byte) *FormatTextMetrics {
+func analyzeXMLTextMetrics(data []byte) (*FormatTextMetrics, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	metrics := &FormatTextMetrics{Format: "xml"}
 
@@ -385,9 +420,9 @@ func analyzeXMLTextMetrics(data []byte) *FormatTextMetrics {
 		}
 		if err != nil {
 			if metrics.TokenCount == 0 {
-				return nil
+				return nil, err
 			}
-			return metrics
+			return metrics, err
 		}
 
 		switch typed := token.(type) {
@@ -413,7 +448,7 @@ func analyzeXMLTextMetrics(data []byte) *FormatTextMetrics {
 		}
 	}
 
-	return metrics
+	return metrics, nil
 }
 
 func updateMaxTokenLength(metrics *FormatTextMetrics, length int) {

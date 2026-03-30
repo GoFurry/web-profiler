@@ -306,6 +306,48 @@ func TestAnalyzeComplexityJSONStats(t *testing.T) {
 	}
 }
 
+func TestAnalyzeComplexityCountsGloballyUniqueJSONKeys(t *testing.T) {
+	sample := bodySample{
+		contentType: "application/json",
+		observed:    []byte(`{"a":1,"nested":{"a":2,"b":3},"items":[{"b":4},{"c":5}]}`),
+		analyzed:    true,
+	}
+
+	var warnings []Warning
+	result := analyzeComplexity(sample, DefaultConfig().Complexity, &warnings)
+
+	if result == nil {
+		t.Fatal("expected complexity result")
+	}
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+
+	if result.UniqueKeyCount != 5 {
+		t.Fatalf("unexpected globally unique key count: got %d want %d", result.UniqueKeyCount, 5)
+	}
+}
+
+func TestAnalyzeComplexityRejectsTrailingJSONData(t *testing.T) {
+	sample := bodySample{
+		contentType: "application/json",
+		observed:    []byte(`{"a":1}{"b":2}`),
+		analyzed:    true,
+	}
+
+	var warnings []Warning
+	result := analyzeComplexity(sample, DefaultConfig().Complexity, &warnings)
+
+	if result != nil {
+		t.Fatalf("expected complexity result to be nil for trailing JSON data, got %+v", result)
+	}
+
+	if !hasWarningCode(warnings, "complexity_parse_failed") {
+		t.Fatalf("expected complexity_parse_failed warning, got %+v", warnings)
+	}
+}
+
 func TestAnalyzeComplexityEmitsWarningWhenJSONLimitIsExceeded(t *testing.T) {
 	sample := bodySample{
 		contentType: "application/json",
@@ -481,7 +523,7 @@ func TestAnalyzeCharsetFlagsSuspiciousPatterns(t *testing.T) {
 		MaxAnalyzeBytes:         64,
 		EnableUnicodeScripts:    true,
 		EnableSuspiciousPattern: true,
-	})
+	}, nil)
 
 	if result == nil {
 		t.Fatal("expected charset result")
@@ -549,7 +591,7 @@ func TestAnalyzeCharsetAddsConfusableAndJSONFormatMetrics(t *testing.T) {
 		EnableSuspiciousPattern:     true,
 		EnableConfusableDetection:   true,
 		EnableFormatSpecificMetrics: true,
-	})
+	}, nil)
 
 	if result == nil {
 		t.Fatal("expected charset result")
@@ -584,6 +626,53 @@ func TestAnalyzeCharsetAddsConfusableAndJSONFormatMetrics(t *testing.T) {
 	}
 }
 
+func TestAnalyzeCharsetFlagsConfusableHomoglyphsWithoutUnicodeScriptAnalysis(t *testing.T) {
+	sample := bodySample{
+		contentType: "text/plain",
+		sample:      []byte("payp\u0430l"),
+		analyzed:    true,
+	}
+
+	result := analyzeCharset(sample, CharsetConfig{
+		MaxAnalyzeBytes:           256,
+		EnableSuspiciousPattern:   true,
+		EnableConfusableDetection: true,
+	}, nil)
+
+	if result == nil {
+		t.Fatal("expected charset result")
+	}
+
+	if result.ConfusableCount <= 0 {
+		t.Fatalf("expected confusable characters to be counted, got %d", result.ConfusableCount)
+	}
+
+	if !slices.Contains(result.SuspiciousFlags, "confusable_homoglyphs") {
+		t.Fatalf("expected confusable_homoglyphs flag, got %+v", result.SuspiciousFlags)
+	}
+}
+
+func TestAnalyzeCharsetRespectsAnalyzeByteLimitForUTF8Validation(t *testing.T) {
+	sample := bodySample{
+		contentType: "text/plain",
+		sample:      append([]byte("hello"), 0xff),
+		analyzed:    true,
+	}
+
+	result := analyzeCharset(sample, CharsetConfig{
+		MaxAnalyzeBytes:         5,
+		EnableSuspiciousPattern: true,
+	}, nil)
+
+	if result == nil {
+		t.Fatal("expected charset result")
+	}
+
+	if slices.Contains(result.SuspiciousFlags, "invalid_utf8") {
+		t.Fatalf("did not expect invalid_utf8 flag outside the analyze window, got %+v", result.SuspiciousFlags)
+	}
+}
+
 func TestAnalyzeCharsetAddsFormAndXMLFormatMetrics(t *testing.T) {
 	formSample := bodySample{
 		contentType: "application/x-www-form-urlencoded",
@@ -593,7 +682,7 @@ func TestAnalyzeCharsetAddsFormAndXMLFormatMetrics(t *testing.T) {
 	formResult := analyzeCharset(formSample, CharsetConfig{
 		MaxAnalyzeBytes:             256,
 		EnableFormatSpecificMetrics: true,
-	})
+	}, nil)
 	if formResult == nil || formResult.FormatMetrics == nil {
 		t.Fatal("expected form format metrics")
 	}
@@ -612,7 +701,7 @@ func TestAnalyzeCharsetAddsFormAndXMLFormatMetrics(t *testing.T) {
 	xmlResult := analyzeCharset(xmlSample, CharsetConfig{
 		MaxAnalyzeBytes:             256,
 		EnableFormatSpecificMetrics: true,
-	})
+	}, nil)
 	if xmlResult == nil || xmlResult.FormatMetrics == nil {
 		t.Fatal("expected xml format metrics")
 	}
@@ -621,6 +710,57 @@ func TestAnalyzeCharsetAddsFormAndXMLFormatMetrics(t *testing.T) {
 	}
 	if xmlResult.FormatMetrics.TagCount != 2 || xmlResult.FormatMetrics.AttributeCount != 1 || xmlResult.FormatMetrics.TextNodeCount != 1 {
 		t.Fatalf("unexpected xml format metrics: %+v", xmlResult.FormatMetrics)
+	}
+}
+
+func TestAnalyzeCharsetTrimsIncompleteUTF8SuffixAtAnalyzeBoundary(t *testing.T) {
+	sample := bodySample{
+		contentType: "text/plain",
+		sample:      []byte("你好"),
+		analyzed:    true,
+	}
+
+	result := analyzeCharset(sample, CharsetConfig{
+		MaxAnalyzeBytes:         5,
+		EnableSuspiciousPattern: true,
+	}, nil)
+
+	if result == nil {
+		t.Fatal("expected charset result")
+	}
+
+	if result.TotalChars != 1 {
+		t.Fatalf("expected one fully decoded rune after trimming, got %d", result.TotalChars)
+	}
+
+	if slices.Contains(result.SuspiciousFlags, "invalid_utf8") {
+		t.Fatalf("did not expect invalid_utf8 for boundary-trimmed UTF-8, got %+v", result.SuspiciousFlags)
+	}
+}
+
+func TestAnalyzeCharsetWarnsWhenFormatMetricsArePartial(t *testing.T) {
+	sample := bodySample{
+		contentType: "application/json",
+		sample:      []byte(`{"user":"alice"`),
+		analyzed:    true,
+	}
+
+	var warnings []Warning
+	result := analyzeCharset(sample, CharsetConfig{
+		MaxAnalyzeBytes:             256,
+		EnableFormatSpecificMetrics: true,
+	}, &warnings)
+
+	if result == nil {
+		t.Fatal("expected charset result")
+	}
+
+	if result.FormatMetrics == nil {
+		t.Fatal("expected partial format metrics")
+	}
+
+	if !hasWarningCode(warnings, "charset_format_metrics_partial") {
+		t.Fatalf("expected charset_format_metrics_partial warning, got %+v", warnings)
 	}
 }
 
