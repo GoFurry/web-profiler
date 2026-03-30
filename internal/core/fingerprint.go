@@ -1,4 +1,4 @@
-package webprofiler
+package core
 
 import (
 	"crypto/sha1"

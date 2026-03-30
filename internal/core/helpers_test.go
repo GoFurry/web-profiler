@@ -1,4 +1,4 @@
-package webprofiler
+package core
 
 func hasWarningCode(warnings []Warning, code string) bool {
 	for _, warning := range warnings {

@@ -1,6 +1,12 @@
-package webprofiler
+package model
 
-import "time"
+import (
+	"time"
+
+	"github.com/GoFurry/web-profiler/internal/policy"
+)
+
+type SampleStrategy = policy.SampleStrategy
 
 type Profile struct {
 	Meta        MetaInfo

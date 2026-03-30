@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/github/license/GoFurry/coraza-fiber-lite)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.26-blue)](go.mod)
 
-**[中文文档](README_zh.md) | English**
+**[中文文档](docs/README_zh.md) | English**
 
 `web-profiler` is a lightweight request analysis middleware for `net/http`.
 It inspects incoming requests with bounded overhead, restores the request body for downstream handlers, and exposes structured results through `context.Context`.
@@ -351,7 +351,13 @@ type Profile struct {
 
 Analyzer results are optional pointers so handlers can distinguish between disabled, skipped, and populated modules.
 
-For a deeper breakdown of the internals and extension strategy, see [Architecture.md](Architecture.md).
+Repository layout is intentionally simple:
+
+- root package: stable middleware API for callers
+- `example/`: runnable demo program
+- `internal/policy`: config types and normalization
+- `internal/model`: profile and result types
+- `internal/core`: request capture, analyzers, and context plumbing
 
 ## Testing
 

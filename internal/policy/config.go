@@ -1,4 +1,4 @@
-package webprofiler
+package policy
 
 import "strings"
 
@@ -147,6 +147,10 @@ func DefaultConfig() Config {
 			EnableFormatSpecificMetrics: true,
 		},
 	})
+}
+
+func NormalizeConfig(cfg Config) Config {
+	return normalizeConfig(cfg)
 }
 
 func normalizeConfig(cfg Config) Config {

@@ -1,4 +1,4 @@
-package webprofiler
+package policy
 
 import (
 	"slices"

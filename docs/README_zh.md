@@ -1,10 +1,10 @@
 # web-profiler
 
 [![Last Version](https://img.shields.io/github/release/GoFurry/web-profiler/all.svg?logo=github&color=brightgreen)](https://github.com/GoFurry/web-profiler/releases)
-[![License](https://img.shields.io/github/license/GoFurry/coraza-fiber-lite)](LICENSE)
-[![Go Version](https://img.shields.io/badge/go-%3E%3D1.26-blue)](go.mod)
+[![License](https://img.shields.io/github/license/GoFurry/coraza-fiber-lite)](../LICENSE)
+[![Go Version](https://img.shields.io/badge/go-%3E%3D1.26-blue)](../go.mod)
 
-**中文文档 | [English](README.md)**
+**中文文档 | [English](../README.md)**
 
 `web-profiler` 是一个面向 `net/http` 的轻量级请求分析中间件。
 它会在受控开销下分析进入的请求，并把结构化结果写入 `context.Context`，同时保证下游 handler 依然可以继续读取原始请求体。
@@ -69,7 +69,7 @@ func main() {
 handler := webprofiler.Wrap(mux, webprofiler.DefaultConfig())
 ```
 
-一个可直接运行的原生 `net/http` 示例放在 [`example/main.go`](example/main.go)。
+一个可直接运行的原生 `net/http` 示例放在 [`../example/main.go`](../example/main.go)。
 
 ## 在 handler 里读取分析结果
 
@@ -250,7 +250,7 @@ cfg.Charset.EnableFormatSpecificMetrics = true
 
 ## 示例返回字段对照表
 
-[`example/main.go`](example/main.go) 返回的 JSON 里，每个字段大致表示如下：
+[`../example/main.go`](../example/main.go) 返回的 JSON 里，每个字段大致表示如下：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -351,7 +351,13 @@ type Profile struct {
 
 各分析模块使用可选指针字段，便于业务区分“未启用”“被跳过”和“已有结果”。
 
-如果你想看更完整的内部结构和后续演进方向，可以继续阅读 [Architecture_zh.md](Architecture_zh.md)。
+仓库目录保持得比较克制：
+
+- 根包：对外稳定的中间件 API
+- `example/`：可直接运行的示例程序
+- `internal/policy`：配置类型和归一化逻辑
+- `internal/model`：画像结果和公开数据结构
+- `internal/core`：请求采样、分析器和上下文注入实现
 
 ## 测试
 
@@ -363,4 +369,4 @@ go test ./...
 
 ## 🐺 License
 
-本项目基于 [MIT License](LICENSE) 开源, 允许商业使用、修改、分发, 无需保留原作者版权声明。
+本项目基于 [MIT License](../LICENSE) 开源, 允许商业使用、修改、分发, 无需保留原作者版权声明。
