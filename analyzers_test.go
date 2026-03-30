@@ -764,6 +764,32 @@ func TestAnalyzeCharsetWarnsWhenFormatMetricsArePartial(t *testing.T) {
 	}
 }
 
+func TestAnalyzeCharsetWarnsWhenJSONFormatMetricsHaveTrailingData(t *testing.T) {
+	sample := bodySample{
+		contentType: "application/json",
+		sample:      []byte(`{"a":1}{"b":2}`),
+		analyzed:    true,
+	}
+
+	var warnings []Warning
+	result := analyzeCharset(sample, CharsetConfig{
+		MaxAnalyzeBytes:             256,
+		EnableFormatSpecificMetrics: true,
+	}, &warnings)
+
+	if result == nil {
+		t.Fatal("expected charset result")
+	}
+
+	if result.FormatMetrics == nil {
+		t.Fatal("expected partial format metrics from the first JSON payload")
+	}
+
+	if !hasWarningCode(warnings, "charset_format_metrics_partial") {
+		t.Fatalf("expected charset_format_metrics_partial warning, got %+v", warnings)
+	}
+}
+
 func TestDecodeObservedBodySupportsGzip(t *testing.T) {
 	var compressed bytes.Buffer
 	writer := gzip.NewWriter(&compressed)

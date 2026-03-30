@@ -36,7 +36,11 @@ func (r replayReadCloser) Close() error {
 }
 
 func (s bodySample) isDecodedForStructuredAnalysis() bool {
-	return s.contentEncoding == "" || s.decoded
+	return !s.hasActiveContentEncoding() || s.decoded
+}
+
+func (s bodySample) hasActiveContentEncoding() bool {
+	return len(parseContentEncodings(s.contentEncoding)) > 0
 }
 
 func captureBody(r *http.Request, cfg BodyConfig, warnings *[]Warning) bodySample {
@@ -88,7 +92,7 @@ func captureBody(r *http.Request, cfg BodyConfig, warnings *[]Warning) bodySampl
 		}
 	}
 
-	if sample.contentEncoding != "" && !sample.decoded {
+	if sample.hasActiveContentEncoding() && !sample.decoded {
 		appendWarning(warnings, "body_encoded_not_decoded", "request body remains content-encoded, so structured and charset analysis was skipped")
 	}
 	sample.sample, sample.sampled = buildSample(observed, cfg.SampleBytes, cfg.SampleStrategy)

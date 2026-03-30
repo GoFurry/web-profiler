@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net/url"
 	"strings"
@@ -302,6 +303,7 @@ func analyzeJSONTextMetrics(data []byte) (*FormatTextMetrics, error) {
 
 	metrics := &FormatTextMetrics{Format: "json"}
 	frames := make([]jsonFrame, 0, 8)
+	topLevelValueComplete := false
 
 	for {
 		token, err := decoder.Token()
@@ -313,6 +315,9 @@ func analyzeJSONTextMetrics(data []byte) (*FormatTextMetrics, error) {
 				return nil, err
 			}
 			return metrics, err
+		}
+		if topLevelValueComplete {
+			return metrics, errors.New("unexpected trailing data after JSON payload")
 		}
 
 		metrics.TokenCount++
@@ -356,6 +361,10 @@ func analyzeJSONTextMetrics(data []byte) (*FormatTextMetrics, error) {
 			updateMaxTokenLength(metrics, len("null"))
 			metrics.ValueCount++
 			markJSONValueConsumed(frames)
+		}
+
+		if len(frames) == 0 && metrics.TokenCount > 0 {
+			topLevelValueComplete = true
 		}
 	}
 

@@ -371,6 +371,30 @@ func TestAnalyzeRequestSkipsStructuredAnalysisForEncodedBodyWhenCompressedAnalys
 	}
 }
 
+func TestAnalyzeRequestDoesNotSkipIdentityEncodedBody(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/upload", strings.NewReader(`{"msg":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "identity")
+
+	cfg := DefaultConfig()
+	profile := analyzeRequest(req, cfg)
+	if profile == nil {
+		t.Fatal("expected profile")
+	}
+
+	if profile.Complexity == nil {
+		t.Fatal("expected complexity analysis to run for identity-encoded body")
+	}
+
+	if profile.Charset == nil {
+		t.Fatal("expected charset analysis to run for identity-encoded body")
+	}
+
+	if hasWarningCode(profile.Warnings, "body_encoded_not_decoded") {
+		t.Fatalf("did not expect body_encoded_not_decoded warning, got %+v", profile.Warnings)
+	}
+}
+
 func TestAnalyzeRequestSupportsMultipartMetaWithDocumentedConfig(t *testing.T) {
 	var payload bytes.Buffer
 	writer := multipart.NewWriter(&payload)
