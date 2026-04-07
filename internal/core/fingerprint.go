@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -167,25 +168,49 @@ func clientIP(r *http.Request, cfg FingerprintConfig) string {
 				continue
 			}
 
-			if header == "x-forwarded-for" {
+			switch header {
+			case "forwarded":
+				value = forwardedForValue(value)
+			case "x-forwarded-for":
 				if idx := strings.IndexByte(value, ','); idx >= 0 {
 					value = value[:idx]
 				}
 			}
 
-			if host, _, err := net.SplitHostPort(strings.TrimSpace(value)); err == nil {
-				return host
+			if ip, ok := parseNormalizedIP(value); ok {
+				return ip
 			}
-
-			return strings.TrimSpace(value)
 		}
 	}
 
-	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
-		return host
+	if ip, ok := parseNormalizedIP(r.RemoteAddr); ok {
+		return ip
 	}
 
-	return strings.TrimSpace(r.RemoteAddr)
+	return ""
+}
+
+func forwardedForValue(headerValue string) string {
+	for _, fieldValue := range strings.Split(headerValue, ",") {
+		pairs := strings.Split(fieldValue, ";")
+		for _, pair := range pairs {
+			key, value, ok := strings.Cut(pair, "=")
+			if !ok {
+				continue
+			}
+			if strings.ToLower(strings.TrimSpace(key)) != "for" {
+				continue
+			}
+
+			value = strings.TrimSpace(strings.Trim(value, `"`))
+			if value == "" || strings.HasPrefix(value, "_") {
+				return ""
+			}
+			return value
+		}
+	}
+
+	return ""
 }
 
 func shouldTrustProxyHeaders(r *http.Request, cfg FingerprintConfig) bool {
@@ -211,10 +236,10 @@ func shouldTrustProxyHeaders(r *http.Request, cfg FingerprintConfig) bool {
 }
 
 func remoteAddrIP(remoteAddr string) net.IP {
-	if host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr)); err == nil {
-		return net.ParseIP(host)
+	if normalized, ok := parseNormalizedIP(remoteAddr); ok {
+		return net.ParseIP(normalized)
 	}
-	return net.ParseIP(strings.TrimSpace(remoteAddr))
+	return nil
 }
 
 func containsIP(cidr string, ip net.IP) bool {
@@ -244,4 +269,27 @@ func tlsVersionString(version uint16) string {
 	default:
 		return "unknown"
 	}
+}
+
+func parseNormalizedIP(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+
+	if addr, err := netip.ParseAddr(value); err == nil {
+		return addr.String(), true
+	}
+
+	if addrPort, err := netip.ParseAddrPort(value); err == nil {
+		return addrPort.Addr().String(), true
+	}
+
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if addr, err := netip.ParseAddr(strings.TrimSpace(host)); err == nil {
+			return addr.String(), true
+		}
+	}
+
+	return "", false
 }

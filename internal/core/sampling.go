@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"io"
 	"mime"
 	"net/http"
@@ -196,21 +197,31 @@ func decodeObservedBody(data []byte, encodingHeader string, maxBytes int64, chun
 	if len(encodings) == 0 {
 		return nil, false, false, nil
 	}
-	if len(encodings) > 1 {
-		return nil, false, false, errUnsupportedContentEncodingChain
+
+	current := append([]byte(nil), data...)
+	for i := len(encodings) - 1; i >= 0; i-- {
+		current, truncated, err = decodeContentEncodingLayer(current, encodings[i], maxBytes, chunkSize)
+		if err != nil {
+			return nil, truncated, true, err
+		}
+		applied = true
 	}
 
+	return current, truncated, applied, nil
+}
+
+func decodeContentEncodingLayer(data []byte, encoding string, maxBytes int64, chunkSize int) (decoded []byte, truncated bool, err error) {
 	var reader io.ReadCloser
-	switch encodings[0] {
+	switch encoding {
 	case "gzip":
 		reader, err = gzip.NewReader(bytes.NewReader(data))
 	case "deflate":
-		reader = flate.NewReader(bytes.NewReader(data))
+		reader, err = newDeflateReader(data)
 	default:
-		return nil, false, false, errUnsupportedContentEncoding
+		return nil, false, errUnsupportedContentEncoding
 	}
 	if err != nil {
-		return nil, false, true, err
+		return nil, false, err
 	}
 	defer func() {
 		_ = reader.Close()
@@ -220,12 +231,18 @@ func decodeObservedBody(data []byte, encodingHeader string, maxBytes int64, chun
 	if truncated && maxBytes > 0 {
 		decoded = decoded[:maxBytes]
 	}
-	return decoded, truncated, true, err
+	return decoded, truncated, err
+}
+
+func newDeflateReader(data []byte) (io.ReadCloser, error) {
+	if reader, err := zlib.NewReader(bytes.NewReader(data)); err == nil {
+		return reader, nil
+	}
+	return flate.NewReader(bytes.NewReader(data)), nil
 }
 
 var (
-	errUnsupportedContentEncoding      = unsupportedContentEncodingError("unsupported content encoding for body analysis")
-	errUnsupportedContentEncodingChain = unsupportedContentEncodingError("multiple content encodings are not supported for body analysis")
+	errUnsupportedContentEncoding = unsupportedContentEncodingError("unsupported content encoding for body analysis")
 )
 
 type unsupportedContentEncodingError string

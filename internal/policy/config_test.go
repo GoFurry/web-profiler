@@ -295,3 +295,15 @@ func TestNormalizeConfigEnablesMultipartTypesWhenMultipartMetaIsOn(t *testing.T)
 		t.Fatalf("expected multipart/form-data in complexity supported content types, got %v", cfg.Complexity.SupportedContentTypes)
 	}
 }
+
+func TestNormalizeConfigDropsInvalidTrustedProxyCIDRs(t *testing.T) {
+	cfg := normalizeConfig(Config{
+		Fingerprint: FingerprintConfig{
+			TrustedProxyCIDRs: []string{"bad-cidr", "10.0.0.0/8", " 2001:0db8::1 ", "10.0.0.0/8"},
+		},
+	})
+
+	if !slices.Equal(cfg.Fingerprint.TrustedProxyCIDRs, []string{"10.0.0.0/8", "2001:db8::1"}) {
+		t.Fatalf("unexpected normalized trusted proxy CIDRs: got %v", cfg.Fingerprint.TrustedProxyCIDRs)
+	}
+}

@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"io"
 	"mime"
@@ -52,6 +53,10 @@ func analyzeComplexity(sample bodySample, cfg ComplexityConfig, warnings *[]Warn
 		return analyzeJSONComplexity(sample, cfg, warnings)
 	case sample.contentType == "application/x-www-form-urlencoded" && cfg.EnableFormAnalysis:
 		return analyzeFormComplexity(sample.observed)
+	case matchContentTypePattern(sample.contentType, "application/xml"),
+		matchContentTypePattern(sample.contentType, "application/*+xml"),
+		matchContentTypePattern(sample.contentType, "text/xml"):
+		return analyzeXMLComplexity(sample, cfg, warnings)
 	case sample.contentType == "multipart/form-data" && cfg.EnableMultipartMeta:
 		return analyzeMultipartComplexity(sample, warnings)
 	default:
@@ -246,6 +251,150 @@ func analyzeFormComplexity(data []byte) *ComplexityResult {
 		MaxObjectFields:    uniqueKeyCount,
 		MaxKeyLength:       maxKeyLength,
 		MaxValueLength:     maxValueLength,
+		AverageKeyLength:   averageKeyLength,
+		AverageValueLength: averageValueLength,
+		Score:              sumScoreFactors(factors),
+		ScoreFactors:       factors,
+	}
+}
+
+func analyzeXMLComplexity(sample bodySample, cfg ComplexityConfig, warnings *[]Warning) *ComplexityResult {
+	decoder := xml.NewDecoder(bytes.NewReader(sample.observed))
+
+	depth := 0
+	maxDepth := 0
+	elementCount := 0
+	attributeCount := 0
+	textNodeCount := 0
+	maxAttributes := 0
+	maxNameLength := 0
+	maxTextLength := 0
+	maxAttributeValueLength := 0
+	totalNameLength := 0
+	totalValueLength := 0
+	valueCount := 0
+	nameCount := 0
+	uniqueNames := make(map[string]struct{})
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			appendWarning(warnings, "complexity_parse_failed", err.Error())
+			if elementCount == 0 && attributeCount == 0 && textNodeCount == 0 {
+				return nil
+			}
+			break
+		}
+
+		switch typed := token.(type) {
+		case xml.StartElement:
+			depth++
+			if depth > cfg.MaxJSONDepth {
+				appendWarning(warnings, "complexity_limit_exceeded", errComplexityDepthExceeded.Error())
+				depth--
+				return buildXMLComplexityResult(sample.contentType, maxDepth, elementCount, attributeCount, textNodeCount, len(uniqueNames), maxAttributes, maxNameLength, maxTextLength, maxAttributeValueLength, totalNameLength, totalValueLength, nameCount, valueCount)
+			}
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+
+			elementCount++
+			if elementCount+attributeCount > cfg.MaxFields {
+				appendWarning(warnings, "complexity_limit_exceeded", errComplexityFieldExceeded.Error())
+				return buildXMLComplexityResult(sample.contentType, maxDepth, elementCount, attributeCount, textNodeCount, len(uniqueNames), maxAttributes, maxNameLength, maxTextLength, maxAttributeValueLength, totalNameLength, totalValueLength, nameCount, valueCount)
+			}
+
+			elementNameLength := len(typed.Name.Local)
+			totalNameLength += elementNameLength
+			nameCount++
+			if elementNameLength > maxNameLength {
+				maxNameLength = elementNameLength
+			}
+			if typed.Name.Local != "" {
+				uniqueNames[typed.Name.Local] = struct{}{}
+			}
+
+			if len(typed.Attr) > maxAttributes {
+				maxAttributes = len(typed.Attr)
+			}
+			for _, attr := range typed.Attr {
+				attributeCount++
+				if elementCount+attributeCount > cfg.MaxFields {
+					appendWarning(warnings, "complexity_limit_exceeded", errComplexityFieldExceeded.Error())
+					return buildXMLComplexityResult(sample.contentType, maxDepth, elementCount, attributeCount, textNodeCount, len(uniqueNames), maxAttributes, maxNameLength, maxTextLength, maxAttributeValueLength, totalNameLength, totalValueLength, nameCount, valueCount)
+				}
+
+				nameLength := len(attr.Name.Local)
+				totalNameLength += nameLength
+				nameCount++
+				if nameLength > maxNameLength {
+					maxNameLength = nameLength
+				}
+				if attr.Name.Local != "" {
+					uniqueNames[attr.Name.Local] = struct{}{}
+				}
+
+				valueLength := len(attr.Value)
+				totalValueLength += valueLength
+				valueCount++
+				if valueLength > maxAttributeValueLength {
+					maxAttributeValueLength = valueLength
+				}
+			}
+		case xml.EndElement:
+			if depth > 0 {
+				depth--
+			}
+		case xml.CharData:
+			text := strings.TrimSpace(string(typed))
+			if text == "" {
+				continue
+			}
+			textNodeCount++
+			valueCount++
+			textLength := len(text)
+			totalValueLength += textLength
+			if textLength > maxTextLength {
+				maxTextLength = textLength
+			}
+		}
+	}
+
+	return buildXMLComplexityResult(sample.contentType, maxDepth, elementCount, attributeCount, textNodeCount, len(uniqueNames), maxAttributes, maxNameLength, maxTextLength, maxAttributeValueLength, totalNameLength, totalValueLength, nameCount, valueCount)
+}
+
+func buildXMLComplexityResult(contentType string, depth, elementCount, attributeCount, textNodeCount, uniqueKeyCount, maxAttributes, maxNameLength, maxTextLength, maxAttributeValueLength, totalNameLength, totalValueLength, nameCount, valueCount int) *ComplexityResult {
+	factors := []ScoreFactor{
+		{Name: "depth", Value: depth},
+		{Name: "fields", Value: minInt((elementCount+attributeCount)/10, 20)},
+		{Name: "text_nodes", Value: minInt(textNodeCount, 20)},
+	}
+
+	averageKeyLength := 0.0
+	if nameCount > 0 {
+		averageKeyLength = float64(totalNameLength) / float64(nameCount)
+	}
+
+	averageValueLength := 0.0
+	if valueCount > 0 {
+		averageValueLength = float64(totalValueLength) / float64(valueCount)
+	}
+
+	return &ComplexityResult{
+		ContentType:        contentType,
+		Depth:              depth,
+		FieldCount:         elementCount + attributeCount,
+		ObjectCount:        elementCount,
+		ScalarCount:        textNodeCount,
+		StringCount:        textNodeCount,
+		UniqueKeyCount:     uniqueKeyCount,
+		MaxObjectFields:    maxAttributes,
+		MaxKeyLength:       maxNameLength,
+		MaxStringLength:    maxTextLength,
+		MaxValueLength:     maxAttributeValueLength,
 		AverageKeyLength:   averageKeyLength,
 		AverageValueLength: averageValueLength,
 		Score:              sumScoreFactors(factors),

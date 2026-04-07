@@ -2,7 +2,9 @@ package core
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"crypto/tls"
 	"mime/multipart"
 	"net/http"
@@ -185,6 +187,37 @@ func TestClientIPHonorsTrustedProxyCIDRs(t *testing.T) {
 	req.RemoteAddr = "10.1.2.3:8080"
 	if got := clientIP(req, cfg); got != "203.0.113.9" {
 		t.Fatalf("unexpected client ip for trusted proxy: got %q want %q", got, "203.0.113.9")
+	}
+}
+
+func TestClientIPIgnoresInvalidProxyValuesAndNormalizesAddresses(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
+	req.Header.Set("X-Forwarded-For", "not-an-ip, 203.0.113.9")
+	req.RemoteAddr = "[2001:0db8::1]:443"
+
+	cfg := FingerprintConfig{
+		TrustProxy:   true,
+		ProxyHeaders: []string{"x-forwarded-for"},
+	}
+
+	if got := clientIP(req, cfg); got != "2001:db8::1" {
+		t.Fatalf("unexpected normalized client ip fallback: got %q want %q", got, "2001:db8::1")
+	}
+}
+
+func TestClientIPSupportsForwardedHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/ping", nil)
+	req.Header.Set("Forwarded", `for="[2001:0db8::2]:8443";proto=https, for=198.51.100.10`)
+	req.RemoteAddr = "10.1.2.3:8080"
+
+	cfg := FingerprintConfig{
+		TrustProxy:        true,
+		ProxyHeaders:      []string{"forwarded"},
+		TrustedProxyCIDRs: []string{"10.0.0.0/8"},
+	}
+
+	if got := clientIP(req, cfg); got != "2001:db8::2" {
+		t.Fatalf("unexpected forwarded client ip: got %q want %q", got, "2001:db8::2")
 	}
 }
 
@@ -511,6 +544,73 @@ func TestAnalyzeComplexityMultipartMetadata(t *testing.T) {
 	}
 }
 
+func TestAnalyzeComplexityXMLStats(t *testing.T) {
+	sample := bodySample{
+		contentType: "application/xml",
+		observed:    []byte(`<root lang="en"><user id="1">Alice</user><meta><tag>go</tag></meta></root>`),
+		analyzed:    true,
+	}
+
+	var warnings []Warning
+	result := analyzeComplexity(sample, DefaultConfig().Complexity, &warnings)
+	if result == nil {
+		t.Fatal("expected XML complexity result")
+	}
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+
+	if result.ContentType != "application/xml" {
+		t.Fatalf("unexpected content type: got %q want %q", result.ContentType, "application/xml")
+	}
+
+	if result.Depth != 3 {
+		t.Fatalf("unexpected depth: got %d want 3", result.Depth)
+	}
+
+	if result.FieldCount != 6 {
+		t.Fatalf("unexpected field count: got %d want 6", result.FieldCount)
+	}
+
+	if result.ObjectCount != 4 {
+		t.Fatalf("unexpected object count: got %d want 4", result.ObjectCount)
+	}
+
+	if result.StringCount != 2 || result.ScalarCount != 2 {
+		t.Fatalf("unexpected string/scalar counts: %+v", result)
+	}
+
+	if result.UniqueKeyCount != 6 {
+		t.Fatalf("unexpected unique key count: got %d want 6", result.UniqueKeyCount)
+	}
+
+	if result.MaxObjectFields != 1 {
+		t.Fatalf("unexpected max object fields: got %d want 1", result.MaxObjectFields)
+	}
+
+	if result.MaxKeyLength != 4 {
+		t.Fatalf("unexpected max key length: got %d want 4", result.MaxKeyLength)
+	}
+
+	if result.MaxStringLength != 5 {
+		t.Fatalf("unexpected max string length: got %d want 5", result.MaxStringLength)
+	}
+
+	if result.MaxValueLength != 2 {
+		t.Fatalf("unexpected max value length: got %d want 2", result.MaxValueLength)
+	}
+
+	wantFactors := []ScoreFactor{
+		{Name: "depth", Value: 3},
+		{Name: "fields", Value: 0},
+		{Name: "text_nodes", Value: 2},
+	}
+	if !slices.Equal(result.ScoreFactors, wantFactors) {
+		t.Fatalf("unexpected score factors: got %+v want %+v", result.ScoreFactors, wantFactors)
+	}
+}
+
 func TestAnalyzeCharsetFlagsSuspiciousPatterns(t *testing.T) {
 	data := append([]byte("abc123 \u200b\u6c49\u3042\U0001F60A"), 0xff)
 	sample := bodySample{
@@ -649,6 +749,32 @@ func TestAnalyzeCharsetFlagsConfusableHomoglyphsWithoutUnicodeScriptAnalysis(t *
 
 	if !slices.Contains(result.SuspiciousFlags, "confusable_homoglyphs") {
 		t.Fatalf("expected confusable_homoglyphs flag, got %+v", result.SuspiciousFlags)
+	}
+}
+
+func TestAnalyzeCharsetDoesNotFlagSingleScriptConfusablesWithoutMixedScripts(t *testing.T) {
+	sample := bodySample{
+		contentType: "text/plain",
+		sample:      []byte("\u0391\u0392\u0395"),
+		analyzed:    true,
+	}
+
+	result := analyzeCharset(sample, CharsetConfig{
+		MaxAnalyzeBytes:           256,
+		EnableSuspiciousPattern:   true,
+		EnableConfusableDetection: true,
+	}, nil)
+
+	if result == nil {
+		t.Fatal("expected charset result")
+	}
+
+	if result.ConfusableCount <= 0 {
+		t.Fatalf("expected confusable characters to be counted, got %d", result.ConfusableCount)
+	}
+
+	if slices.Contains(result.SuspiciousFlags, "confusable_homoglyphs") {
+		t.Fatalf("did not expect confusable_homoglyphs flag for a single non-latin script, got %+v", result.SuspiciousFlags)
 	}
 }
 
@@ -812,5 +938,63 @@ func TestDecodeObservedBodySupportsGzip(t *testing.T) {
 	}
 	if string(decoded) != `{"msg":"hello"}` {
 		t.Fatalf("unexpected decoded payload: got %q want %q", string(decoded), `{"msg":"hello"}`)
+	}
+}
+
+func TestDecodeObservedBodySupportsZlibWrappedDeflate(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(`{"msg":"hello"}`)); err != nil {
+		t.Fatalf("zlib write failed: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zlib close failed: %v", err)
+	}
+
+	decoded, truncated, applied, err := decodeObservedBody(compressed.Bytes(), "deflate", 1024, 4)
+	if err != nil {
+		t.Fatalf("decodeObservedBody returned error: %v", err)
+	}
+	if !applied || truncated {
+		t.Fatalf("unexpected decode state: applied=%v truncated=%v", applied, truncated)
+	}
+	if string(decoded) != `{"msg":"hello"}` {
+		t.Fatalf("unexpected decoded payload: got %q want %q", string(decoded), `{"msg":"hello"}`)
+	}
+}
+
+func TestDecodeObservedBodySupportsEncodingChains(t *testing.T) {
+	payload := []byte(`{"msg":"hello"}`)
+
+	var deflated bytes.Buffer
+	deflater, err := flate.NewWriter(&deflated, flate.DefaultCompression)
+	if err != nil {
+		t.Fatalf("flate writer failed: %v", err)
+	}
+	if _, err := deflater.Write(payload); err != nil {
+		t.Fatalf("flate write failed: %v", err)
+	}
+	if err := deflater.Close(); err != nil {
+		t.Fatalf("flate close failed: %v", err)
+	}
+
+	var gzipped bytes.Buffer
+	gzipWriter := gzip.NewWriter(&gzipped)
+	if _, err := gzipWriter.Write(deflated.Bytes()); err != nil {
+		t.Fatalf("gzip write failed: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("gzip close failed: %v", err)
+	}
+
+	decoded, truncated, applied, err := decodeObservedBody(gzipped.Bytes(), "deflate, gzip", 1024, 4)
+	if err != nil {
+		t.Fatalf("decodeObservedBody returned error: %v", err)
+	}
+	if !applied || truncated {
+		t.Fatalf("unexpected decode state: applied=%v truncated=%v", applied, truncated)
+	}
+	if string(decoded) != string(payload) {
+		t.Fatalf("unexpected decoded payload: got %q want %q", string(decoded), string(payload))
 	}
 }

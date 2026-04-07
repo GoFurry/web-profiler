@@ -40,6 +40,7 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig, warnings *[]Warning) *
 	confusable := 0
 	zeroWidthFound := false
 	scriptCounts := make(map[string]int)
+	confusableScriptCounts := make(map[string]int)
 
 	for len(data) > 0 {
 		r, size := utf8.DecodeRune(data)
@@ -88,9 +89,14 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig, warnings *[]Warning) *
 		if cfg.EnableConfusableDetection && confusableSkeleton(r) != "" {
 			confusable++
 		}
-		if cfg.EnableUnicodeScripts {
+		if cfg.EnableUnicodeScripts || cfg.EnableConfusableDetection {
 			if script := majorScript(r); script != "" {
-				scriptCounts[script]++
+				if cfg.EnableConfusableDetection {
+					confusableScriptCounts[script]++
+				}
+				if cfg.EnableUnicodeScripts {
+					scriptCounts[script]++
+				}
 			}
 		}
 
@@ -142,7 +148,7 @@ func analyzeCharset(sample bodySample, cfg CharsetConfig, warnings *[]Warning) *
 		if cfg.EnableUnicodeScripts && len(scriptCounts) > 1 {
 			result.SuspiciousFlags = append(result.SuspiciousFlags, "mixed_unicode_scripts")
 		}
-		if cfg.EnableConfusableDetection && shouldFlagConfusable(scriptCounts, confusable) {
+		if cfg.EnableConfusableDetection && shouldFlagConfusable(confusableScriptCounts, confusable) {
 			result.SuspiciousFlags = append(result.SuspiciousFlags, "confusable_homoglyphs")
 		}
 	}
@@ -209,6 +215,8 @@ func majorScript(r rune) string {
 	switch {
 	case unicode.Is(unicode.Latin, r):
 		return "latin"
+	case unicode.Is(unicode.Greek, r):
+		return "greek"
 	case unicode.Is(unicode.Han, r):
 		return "han"
 	case unicode.Is(unicode.Hiragana, r):
@@ -221,6 +229,12 @@ func majorScript(r rune) string {
 		return "cyrillic"
 	case unicode.Is(unicode.Arabic, r):
 		return "arabic"
+	case unicode.Is(unicode.Hebrew, r):
+		return "hebrew"
+	case unicode.Is(unicode.Devanagari, r):
+		return "devanagari"
+	case unicode.Is(unicode.Thai, r):
+		return "thai"
 	default:
 		return ""
 	}
@@ -271,6 +285,12 @@ func confusableSkeleton(r rune) string {
 		return "x"
 	case '\u0408', '\u0458':
 		return "j"
+	case '\u0396':
+		return "z"
+	case '\u03BF':
+		return "o"
+	case '\u03C1':
+		return "p"
 	default:
 		return ""
 	}

@@ -1,6 +1,9 @@
 package policy
 
-import "strings"
+import (
+	"net/netip"
+	"strings"
+)
 
 const (
 	defaultMaxReadBytes        int64 = 1 << 20
@@ -38,6 +41,7 @@ var (
 	}
 
 	defaultProxyHeaders = []string{
+		"forwarded",
 		"x-forwarded-for",
 		"x-real-ip",
 	}
@@ -46,6 +50,9 @@ var (
 		"application/json",
 		"application/*+json",
 		"application/x-www-form-urlencoded",
+		"application/xml",
+		"application/*+xml",
+		"text/xml",
 	}
 )
 
@@ -319,11 +326,21 @@ func normalizeCIDRs(values []string) []string {
 		if value == "" {
 			continue
 		}
-		if _, ok := seen[value]; ok {
+
+		canonical := ""
+		if prefix, err := netip.ParsePrefix(value); err == nil {
+			canonical = prefix.String()
+		} else if addr, err := netip.ParseAddr(value); err == nil {
+			canonical = addr.String()
+		} else {
 			continue
 		}
-		seen[value] = struct{}{}
-		normalized = append(normalized, value)
+
+		if _, ok := seen[canonical]; ok {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		normalized = append(normalized, canonical)
 	}
 
 	return normalized
