@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/github/license/GoFurry/coraza-fiber-lite)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.26-blue)](go.mod)
 
-**[中文文档](docs/README_zh.md) | English**
+**[中文文档](docs/README_zh.md) | English | [Benchmark Baseline](docs/benchmark_baseline.md)**
 
 `web-profiler` is a lightweight request analysis middleware for `net/http`.
 It inspects incoming requests with bounded overhead, restores the request body for downstream handlers, and exposes structured results through `context.Context`.
@@ -70,6 +70,8 @@ handler := webprofiler.Wrap(mux, webprofiler.DefaultConfig())
 ```
 
 A runnable native `net/http` example lives at [`example/main.go`](example/main.go).
+
+The latest benchmark reference is recorded in [`docs/benchmark_baseline.md`](docs/benchmark_baseline.md).
 
 ## Using Profile Data In Handlers
 
@@ -237,6 +239,8 @@ cfg.Charset.EnableFormatSpecificMetrics = true
 ```
 
 ## Performance Notes
+
+The current benchmark baseline is tracked in [`docs/benchmark_baseline.md`](docs/benchmark_baseline.md).
 
 - `MetaInfo.AnalysisDuration` records middleware analysis time as `time.Duration`
 - `MetaInfo` now also exposes per-analyzer timings so you can see where request profiling time is spent

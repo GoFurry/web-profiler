@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/github/license/GoFurry/coraza-fiber-lite)](../LICENSE)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.26-blue)](../go.mod)
 
-**中文文档 | [English](../README.md)**
+**中文文档 | [English](../README.md) | [Benchmark Baseline](benchmark_baseline.md)**
 
 `web-profiler` 是一个面向 `net/http` 的轻量级请求分析中间件。
 它会在受控开销下分析进入的请求，并把结构化结果写入 `context.Context`，同时保证下游 handler 依然可以继续读取原始请求体。
@@ -70,6 +70,8 @@ handler := webprofiler.Wrap(mux, webprofiler.DefaultConfig())
 ```
 
 一个可直接运行的原生 `net/http` 示例放在 [`../example/main.go`](../example/main.go)。
+
+最新一轮 benchmark 基线记录放在 [`benchmark_baseline.md`](benchmark_baseline.md)。
 
 ## 在 handler 里读取分析结果
 
@@ -237,6 +239,8 @@ cfg.Charset.EnableFormatSpecificMetrics = true
 ```
 
 ## 性能说明
+
+当前 benchmark 基线记录见 [`benchmark_baseline.md`](benchmark_baseline.md)。
 
 - `MetaInfo.AnalysisDuration` 会记录这次中间件分析本身的耗时，类型是 `time.Duration`
 - `MetaInfo` 现在还会记录分模块耗时，便于你判断时间主要花在指纹、采样、复杂度还是字符分析上
