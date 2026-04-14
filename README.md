@@ -3,6 +3,7 @@
 [![Last Version](https://img.shields.io/github/release/GoFurry/web-profiler/all.svg?logo=github&color=brightgreen)](https://github.com/GoFurry/web-profiler/releases)
 [![License](https://img.shields.io/github/license/GoFurry/coraza-fiber-lite)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.26-blue)](go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/GoFurry/web-profiler)](https://goreportcard.com/report/github.com/GoFurry/web-profiler)
 
 **[中文文档](docs/README_zh.md) | English | [Benchmark Baseline](docs/benchmark_baseline.md)**
 
